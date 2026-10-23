@@ -1,0 +1,5 @@
+/apo
+/runs/
+/.kai/*
+!/.kai/lock.json
+/gold/cache/
