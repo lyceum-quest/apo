@@ -16,6 +16,7 @@ Dataset :: [].{
 		omitted_prefix : Str,
 		reference : Str,
 		limit : [All, First(U64)],
+		lines : [AllLines, Lines(U64, U64)],
 	}
 
 	## A spec from dataset.json. Paths are returned as written; the caller resolves them against the file's folder.
@@ -53,7 +54,22 @@ Dataset :: [].{
 			Ok(v) => First(v.as_u64().map_err(|_| "limit must be a passage count")?)
 			Err(_) => All
 		}
-		Ok({ name, title: text("title", name)?, input, format, passages, token_ids, omitted_prefix: text("omitted_misc_prefix", "")?, reference: text("reference", "")?, limit })
+		lines = match json.field("lines").map_ok(|v| v.items()) {
+			Ok([a, b]) => match (a.as_u64(), b.as_u64()) {
+				(Ok(first), Ok(last)) if first >= 1 and last >= first => Lines(first, last)
+				_ => return Err("lines must be [first, last], 1-based")
+			}
+			Ok(_) => return Err("lines must be [first, last], 1-based")
+			Err(_) => AllLines
+		}
+		Ok({ name, title: text("title", name)?, input, format, passages, token_ids, omitted_prefix: text("omitted_misc_prefix", "")?, reference: text("reference", "")?, limit, lines })
+	}
+
+	## The lines a `lines` range keeps of a line-per-sentence file (all of them without one).
+	slice : Spec, Str -> Str
+	slice = |s, text| match s.lines {
+		AllLines => text
+		Lines(first, last) => Str.join_with(text.replace_each("\r\n", "\n").split_on("\n").drop_first(first - 1).take_first(last - first + 1), "\n")
 	}
 
 	## Whitespace-tokenized text, one sentence per line, as minimal CoNLL-U (forms only, flat under word 1... no tree).
@@ -168,12 +184,9 @@ Dataset :: [].{
 	}
 }
 
-oga = { name: "t", title: "t", input: "x", format: Conllu, passages: BySentence, token_ids: MiscFirst, omitted_prefix: "e_", reference: "", limit: All }
+oga = { name: "t", title: "t", input: "x", format: Conllu, passages: BySentence, token_ids: MiscFirst, omitted_prefix: "e_", reference: "", limit: All, lines: AllLines }
 
-two = match Conllu.parse("1\ta\ta\tX\t_\t_\t0\troot\t_\tt_1\n2\tb\tb\tX\t_\t_\t1\tdep\t_\te_1\n3\tc\tc\tX\t_\t_\t1\tdep\t_\tt_2\n\n1\td\td\tX\t_\t_\t0\troot\t_\tt_3\n\n") {
-	Ok(s) => s
-	Err(_) => []
-}
+two = Conllu.parse("1\ta\ta\tX\t_\t_\t0\troot\t_\tt_1\n2\tb\tb\tX\t_\t_\t1\tdep\t_\te_1\n3\tc\tc\tX\t_\t_\t1\tdep\t_\tt_2\n\n1\td\td\tX\t_\t_\t0\troot\t_\tt_3\n\n") ?? []
 
 expect Dataset.by_sentence(oga, two).map(|p| p.tokens) == [["t_1", "t_2"], ["t_3"]]
 

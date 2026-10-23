@@ -9,9 +9,13 @@ import pf.OsStr
 import pf.Path
 import pf.Stderr
 import pf.Stdout
+import apo.Gold
 import apo.JsonValue
 import apo.Validate
 
+import Archive
+import Compare
+import Evaluate
 import Execute
 import Io
 import Load
@@ -24,7 +28,14 @@ usage =
 	\\usage: apo <command> [options]
 	\\
 	\\commands:
-	\\  validate [--profile <profile.json>] [--json] <file.conllu>...   check CoNLL-U files
+	\\  validate <file.conllu>... [--profile <profile.json>] [--json]   check CoNLL-U files
+	\\  plan <experiment.json> [--only <label>]                        the calls a run would make, and their cost
+	\\  run <experiment.json> [--paid] [--only <label>]                run an experiment; resumes from its store
+	\\  gold fetch <gold.json>                                         download and check a gold set
+	\\  eval <run-dir>... --gold <gold.json> [--json]                  score runs against a gold set
+	\\  compare <run-dir>... --judge <judge.json> --out <dir>          rank runs by pairwise preference (see --help)
+	\\  export <run-dir> <work-dir>                                    write a run as an archive work folder
+	\\  adopt <work-dir> [--runs <dir>]                                wrap a pre-apo work folder as a run
 	\\
 	\\Run `apo <command> --help` for a command's options.
 
@@ -53,6 +64,11 @@ run! = |shown| match shown {
 	["validate", .. as rest] => validate!(rest)
 	["plan", .. as rest] => plan!(rest)
 	["run", .. as rest] => run_experiment!(rest)
+	["gold", .. as rest] => gold!(rest)
+	["eval", .. as rest] => eval!(rest)
+	["compare", .. as rest] => compare!(rest)
+	["export", .. as rest] => export!(rest)
+	["adopt", .. as rest] => adopt!(rest)
 	["--version"] => Stdout.line!(version)
 	["--help"] | ["-h"] | ["help"] | [] => Stdout.line!(usage)
 	[command, ..] => Err(Usage("apo: unknown command ${command}\n\n${usage}"))
@@ -164,11 +180,85 @@ run_experiment! = |words| {
 	for run in runs!(parsed)? {
 		report = Execute.run!(run, version, Live({ paid: has_flag(parsed, "--paid") }))?
 		called = report.steps.map(|s| s.called).sum()
+		failed = report.steps.map(|s| s.failed).sum()
 		cached = report.steps.map(|s| s.cached).sum()
-		Stdout.line!("${report.label}: ${report.status}; ${called.to_str()} call(s), ${cached.to_str()} from the store, $${Execute.money(report.cost)} spent; ${report.dir}")?
+		Stdout.line!("${report.label}: ${report.status}; ${called.to_str()} call(s), ${cached.to_str()} from the store, ${failed.to_str()} item(s) failed, $${Execute.money(report.cost)} spent; ${report.dir}")?
 		if report.status != "completed" {
 			$failed = Bool.True
 		}
 	}
 	if $failed Err(Invalid) else Ok({})
+}
+
+gold! = |words| {
+	parsed = options(words, ["--help"])?
+	match parsed.positional {
+		["fetch", manifest_path] => {
+			manifest = Gold.manifest(Io.json!(manifest_path)?).map_err(|m| Failed("${manifest_path}: ${m}"))?
+			files = Evaluate.fetch!(manifest)?
+			for (name, path) in files {
+				Stdout.line!("${name}: ${path}")?
+			}
+			Stdout.line!("licence: ${manifest.license}")
+		}
+		_ => Stdout.line!("usage: apo gold fetch <gold.json>\n\nDownloads a gold manifest's files into the cache (APO_CACHE, else ~/.cache/apo) and checks each against its pinned SHA-256.")
+	}
+}
+
+eval! = |words| {
+	parsed = options(words, ["--json", "--help"])?
+	manifest_path = match option(parsed, "--gold") {
+		Ok(p) => p
+		Err(_) => return Stdout.line!("usage: apo eval <run-dir>... --gold <gold.json> [--json]\n\nScores each run against a gold set and writes the scores to <run-dir>/eval/<gold>.json.")
+	}
+	manifest = Gold.manifest(Io.json!(manifest_path)?).map_err(|m| Failed("${manifest_path}: ${m}"))?
+	files = Evaluate.fetch!(manifest)?
+	for dir in parsed.positional {
+		run = Evaluate.output!(dir)?
+		scores = Evaluate.score!(manifest, files, run)?
+		record = JsonValue.object([("run", JsonValue.str(dir)), ("label", JsonValue.str(run.label)), ("gold", JsonValue.str(manifest.name)), ("license", JsonValue.str(manifest.license))].concat(scores))
+		Io.write!("${dir}/eval/${manifest.name}.json", JsonValue.pretty(record))?
+		if has_flag(parsed, "--json") {
+			Stdout.line!(JsonValue.encode(record))?
+		} else {
+			Stdout.line!("${run.label} vs ${manifest.name}")?
+			for (name, value) in scores {
+				Stdout.line!("  ${name}: ${JsonValue.encode(value)}")?
+			}
+		}
+	}
+	Ok({})
+}
+
+compare! = |words| {
+	parsed = options(words, ["--paid", "--help"])?
+	dirs = parsed.positional
+	help = "usage:\n  apo compare <run-dir>... --judge <judge.json> --out <dir> [--paid]   a judge model's pairwise preferences\n  apo compare <run-dir>... --export-preferences <sheet.tsv>            a blinded sheet for reviewers\n  apo compare --import-preferences <sheet.tsv>... --key <sheet.tsv.key.json> --out <dir>\n  apo compare <run-dir>... --export-mqm <sheet.tsv>                    an MQM error-annotation sheet\n  apo compare --import-mqm <sheet.tsv> --key <sheet.tsv.key.json>\n\nRuns are compared on passage translations when all have them, else on sentence translations. A judge sees each\npair in both orders; orders that disagree count as a tie. Rankings are Bradley–Terry strengths."
+	if has_flag(parsed, "--help") {
+		return Stdout.line!(help)
+	}
+	match (option(parsed, "--judge"), option(parsed, "--export-preferences"), option(parsed, "--import-preferences"), option(parsed, "--export-mqm"), option(parsed, "--import-mqm")) {
+		(Ok(judge), _, _, _, _) => Compare.judge!(dirs, judge, option(parsed, "--out") ?? "compare", has_flag(parsed, "--paid"))
+		(_, Ok(sheet), _, _, _) => Compare.export_preferences!(dirs, sheet)
+		(_, _, Ok(sheet), _, _) => Compare.import_preferences!(dirs.prepend(sheet), option(parsed, "--key") ?? "${sheet}.key.json", option(parsed, "--out") ?? "compare")
+		(_, _, _, Ok(sheet), _) => Compare.export_mqm!(dirs, sheet)
+		(_, _, _, _, Ok(sheet)) => Compare.import_mqm!(sheet, option(parsed, "--key") ?? "${sheet}.key.json")
+		_ => Stdout.line!(help)
+	}
+}
+
+export! = |words| {
+	parsed = options(words, ["--help"])?
+	match parsed.positional {
+		[run_dir, dest] if !has_flag(parsed, "--help") => Archive.export!(run_dir, dest, version)
+		_ => Stdout.line!("usage: apo export <run-dir> <work-dir>\n\nWrites a completed run as an archive work folder: output.conllu, units.jsonl, config.json (the run, apo version\nand prompts it came from), costs.tsv, and the run's manifest as apo-manifest.json.")
+	}
+}
+
+adopt! = |words| {
+	parsed = options(words, ["--help"])?
+	match parsed.positional {
+		[work] if !has_flag(parsed, "--help") => Archive.adopt!(work, option(parsed, "--runs") ?? "runs", version)
+		_ => Stdout.line!("usage: apo adopt <work-dir> [--runs <dir>]\n\nWraps a work folder made before apo (output.conllu, units.jsonl, config.json) as a run under <dir>/adopted/,\nmarked not replayable, so apo eval and apo compare can score it next to new runs.")
+	}
 }

@@ -137,7 +137,7 @@ Steps :: [].{
 			if !single_line(gloss) or gloss.contains("|") {
 				return Err("gloss for ${id} must be one non-empty line without |")
 			}
-			if gloss == row.form and !punctuation.contains(row.upos) {
+			if gloss == row.form and !punctuation.contains(row.upos) and !symbol(row.form) {
 				return Err("gloss for ${id} copies the form ${row.form}")
 			}
 			$out = $out.append((id, gloss))
@@ -148,6 +148,10 @@ Steps :: [].{
 			[] => Ok($out)
 		}
 	}
+
+	## A form with no letters or digits (punctuation), which may gloss as itself.
+	symbol : Str -> Bool
+	symbol = |form| ["·", "·", "—", "–", "‘", "’", "“", "”", "«", "»", "…", ";", "᾽", "ʼ", "†"].contains(form) or form.to_utf8().all(|b| b < 128 and !((b >= 'a' and b <= 'z') or (b >= 'A' and b <= 'Z') or (b >= '0' and b <= '9')))
 
 	merge_glosses : Conllu.Sentence, List((Str, Str)) -> Conllu.Sentence
 	merge_glosses = |s, glosses| {
@@ -186,12 +190,14 @@ Steps :: [].{
 	}
 }
 
-oga = { name: "t", title: "t", input: "x", format: Conllu, passages: BySentence, token_ids: MiscFirst, omitted_prefix: "e_", reference: "", limit: All }
+oga = { name: "t", title: "t", input: "x", format: Conllu, passages: BySentence, token_ids: MiscFirst, omitted_prefix: "e_", reference: "", limit: All, lines: AllLines }
 
-sentence = match Conllu.parse("# sent_id = 1\n1\tκαί\tκαί\tc\t_\t_\t0\tAuxY\t_\tt_1\n2\t[0]\t_\tv\t_\t_\t1\tPRED\t_\te_1\n3\t.\t.\tu\t_\t_\t1\tAuxK\t_\tt_2\n\n") {
+first_sentence = |text| match Conllu.parse(text) {
 	Ok([s, ..]) => s
 	_ => { line: 0, comments: [], rows: [] }
 }
+
+sentence = first_sentence("# sent_id = 1\n1\tκαί\tκαί\tc\t_\t_\t0\tAuxY\t_\tt_1\n2\t[0]\t_\tv\t_\t_\t1\tPRED\t_\te_1\n3\t.\t.\tu\t_\t_\t1\tAuxK\t_\tt_2\n\n")
 
 glosses_of = |text| Steps.check_glosses(oga, sentence, ["u", "PUNCT"], JsonValue.decode(text) ?? JsonValue.null)
 
@@ -220,3 +226,5 @@ expect {
 	input = Steps.passage_input(oga, [Steps.merge_translation(sentence, 0, "en", { prose: "And.", literal: "And." })], { ref: "1.1", label: "1:1", tokens: ["t_1"] })
 	(input.field("tokens") ?? JsonValue.null).items().len() == 1
 }
+
+expect Steps.symbol("—") and Steps.symbol(",") and !Steps.symbol("καί")

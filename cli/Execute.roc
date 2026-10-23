@@ -7,6 +7,7 @@ import pf.Env
 import pf.Http
 import pf.OsStr
 import pf.Path
+import pf.Sleep
 import pf.Stderr
 import http.Request
 
@@ -22,7 +23,7 @@ import Load
 Execute :: [].{
 	Mode : [Live({ paid : Bool }), Dry]
 
-	StepReport : { kind : Str, items : U64, cached : U64, called : U64, planned : U64, estimate : Dec }
+	StepReport : { kind : Str, items : U64, cached : U64, called : U64, failed : U64, planned : U64, estimate : Dec }
 
 	Report : { label : Str, dir : Str, status : Str, steps : List(StepReport), cost : Dec }
 
@@ -65,11 +66,10 @@ Execute :: [].{
 			}
 			Io.write!("${dir}/manifest.json", JsonValue.pretty(manifest(run, version, located.id, started, "running", $spent)))?
 		}
-		key = if run.model.provider.key_env == "" "" else Env.var_str!(Io.os(run.model.provider.key_env)) ?? ""
-		ctx = { run, dir, mode, key }
+		ctx = { run, dir, mode, key: Io.key!(run.model) }
 		for step in run.steps {
 			kind = Steps.name(step.kind)
-			var $report = { kind, items: 0, cached: 0, called: 0, planned: 0, estimate: 0 }
+			var $report = { kind, items: 0, cached: 0, called: 0, failed: 0, planned: 0, estimate: 0 }
 			items = match step.kind {
 				TranslatePassage => selected.len()
 				_ => $sentences.len()
@@ -77,18 +77,21 @@ Execute :: [].{
 			if step.kind == Align and run.reference.len() < items {
 				return Err(Failed("align needs a reference line for each of ${items.to_str()} sentences; the dataset has ${run.reference.len().to_str()}"))
 			}
+			if mode != Dry and run.model.provider.batch {
+				var $calls = []
+				var $n = 0
+				while $n < items {
+					$calls = $calls.append(request(run, step, $sentences, selected, $n))
+					$n = $n + 1
+				}
+				batch!(ctx, kind, $calls)?
+			}
 			var $i = 0
 			while $i < items and $status == "completed" {
 				sentence = $sentences.get($i) ?? { line: 0, comments: [], rows: [] }
 				label = "${kind} ${($i + 1).to_str()}/${items.to_str()}"
 				_ = if mode != Dry Stderr.write!("\r\u(1b)[2K${run.label}: ${label} · $${money($spent)}") else Ok({})
-				user = match step.kind {
-					TranslateSentence => Steps.sentence_input(run.dataset, sentence)
-					GlossTokens => Steps.gloss_input(run.dataset, sentence)
-					TranslatePassage => Steps.passage_input(run.dataset, $sentences, selected.get($i) ?? { ref: "", label: "", tokens: [] })
-					Align => Steps.align_input(overt(run.dataset, sentence), run.reference.get($i) ?? [])
-				}
-				call = { system: step.system, user: JsonValue.canonical(user), max_tokens: step.max_tokens }
+				call = request(run, step, $sentences, selected, $i)
 				result = match step.kind {
 					TranslateSentence => call!(ctx, $spent, kind, $i, call, |content| Steps.check_translation(Steps.reply_object(content)?)).map_ok(|r| { cost: r.cost, cached: r.cached, apply: TranslatedSentence(r.value) })
 					GlossTokens => call!(ctx, $spent, kind, $i, call, |content| Steps.check_glosses(run.dataset, sentence, step.punctuation, Steps.reply_object(content)?)).map_ok(|r| { cost: r.cost, cached: r.cached, apply: Glossed(r.value) })
@@ -122,13 +125,24 @@ Execute :: [].{
 						$spent = $spent + cost
 						$status = "stopped: ${message}"
 					}
+					Err(Exhausted({ message, cost })) => {
+						$spent = $spent + cost
+						if run.skip_failures {
+							$report = { ..$report, failed: $report.failed + 1 }
+							if step.kind == Align {
+								$links = $links.append(JsonValue.object([("sentence", JsonValue.u64($i + 1)), ("links", JsonValue.list([])), ("failed", JsonValue.bool(Bool.True))]))
+							}
+						} else {
+							$status = "stopped: ${message}"
+						}
+					}
 					Err(Failed(message)) => return Err(Failed(message))
 				}
 				$i = $i + 1
 			}
 			$reports = $reports.append($report)
 			if mode != Dry {
-				write_outputs!(dir, run.dataset.name, $sentences, $units, $links)?
+				write_outputs!(dir, run.dataset.name, $sentences, selected, $units, $links)?
 			}
 		}
 		if mode != Dry {
@@ -138,11 +152,60 @@ Execute :: [].{
 		Ok({ label: run.label, dir, status: $status, steps: $reports, cost: $spent })
 	}
 
+	## The call for item `i` of a step, given the sentences as earlier steps left them.
+	request : Load.Run, Load.Step, List(Conllu.Sentence), List(Dataset.Passage), U64 -> Provider.Call
+	request = |run, step, sentences, selected, i| {
+		sentence = sentences.get(i) ?? { line: 0, comments: [], rows: [] }
+		user = match step.kind {
+			TranslateSentence => Steps.sentence_input(run.dataset, sentence)
+			GlossTokens => Steps.gloss_input(run.dataset, sentence)
+			TranslatePassage => Steps.passage_input(run.dataset, sentences, selected.get(i) ?? { ref: "", label: "", tokens: [] })
+			Align => Steps.align_input(overt(run.dataset, sentence), run.reference.get(i) ?? [])
+		}
+		{ system: step.system, user: JsonValue.canonical(user), max_tokens: step.max_tokens }
+	}
+
+	## Sends a step's calls that are not in the store as one batch, waits for it to end, and keeps each result in
+	## batch/ until `call!` has checked it.
+	batch! : Ctx, Str, List(Provider.Call) => Try({}, [Failed(Str)])
+	batch! = |ctx, kind, calls| {
+		var $pending = []
+		for c in calls {
+			hash = Io.sha256!(JsonValue.canonical(Provider.identity(ctx.run.model, c)))?
+			if !Io.exists!("${ctx.dir}/store/${hash}.json") and !Io.exists!("${ctx.dir}/batch/${hash}.json") and !$pending.any(|(h, _)| h == hash) {
+				$pending = $pending.append((hash, c))
+			}
+		}
+		if $pending.is_empty() {
+			return Ok({})
+		}
+		if Provider.paid(ctx.run.model) and ctx.mode == Live({ paid: Bool.False }) {
+			return Err(Failed("${ctx.run.model.name} is a paid provider; rerun with --paid"))
+		}
+		_ = Stderr.line!("${ctx.run.label}: submitting ${$pending.len().to_str()} ${kind} call(s) as a batch")
+		submitted = Provider.batch_status(send!(Provider.batch_submit(ctx.run.model, $pending, ctx.key), ctx.run.timeout_seconds).map_err(|e| Failed(e))?).map_err(|e| Failed(e))?
+		Io.write!("${ctx.dir}/batch/${submitted.id}.submitted", "")?
+		var $status = submitted
+		while !$status.ended {
+			_ = Sleep.millis!(30000)
+			$status = Provider.batch_status(send!(Provider.batch_poll(ctx.run.model, submitted.id, ctx.key), ctx.run.timeout_seconds).map_err(|e| Failed(e))?).map_err(|e| Failed(e))?
+		}
+		results = send!(Provider.batch_fetch(ctx.run.model, $status.results_url, ctx.key), ctx.run.timeout_seconds).map_err(|e| Failed(e))?
+		for (hash, outcome) in Provider.batch_results(results) {
+			match outcome {
+				Ok(body) => Io.write!("${ctx.dir}/batch/${hash}.json", body)?
+				Err(message) => event!(ctx.dir, kind, 0, 1, Bool.False, { input: 0, output: 0, cache_read: 0 }, 0, 0, "error", message)?
+			}
+		}
+		Ok({})
+	}
+
 	overt : Dataset.Spec, Conllu.Sentence -> List(Str)
 	overt = |spec, s| s.rows.keep_if(|r| !Dataset.is_omitted(spec, r)).map(|r| r.form)
 
-	write_outputs! = |dir, name, sentences, units, links| {
+	write_outputs! = |dir, name, sentences, passages, units, links| {
 		Io.write!("${dir}/output/${name}.conllu", Conllu.serialize(sentences))?
+		Io.write!("${dir}/output/passages.jsonl", Str.join_with(passages.map(|p| "${JsonValue.encode(JsonValue.object([("ref", JsonValue.str(p.ref)), ("label", JsonValue.str(p.label)), ("tokens", JsonValue.strs(p.tokens))]))}\n"), ""))?
 		if !units.is_empty() {
 			Io.write!("${dir}/output/units.jsonl", Str.join_with(units.map(|u| "${JsonValue.canonical(u)}\n"), ""))?
 		}
@@ -173,7 +236,10 @@ Execute :: [].{
 		("experiment", JsonValue.str(run.experiment)),
 		("label", JsonValue.str(run.label)),
 		("model", JsonValue.object([("name", JsonValue.str(run.model.name)), ("provider", JsonValue.str(run.model.provider.name)), ("protocol", JsonValue.str(Provider.protocol_name(run.model.provider.protocol))), ("id", JsonValue.str(run.model.id)), ("options", run.model.options)])),
-		("dataset", JsonValue.object([("name", JsonValue.str(run.dataset.name)), ("title", JsonValue.str(run.dataset.title)), ("input", JsonValue.str(run.dataset.input)), ("passages", JsonValue.u64(Dataset.selected(run.dataset, run.passages).len()))])),
+		("dataset", JsonValue.object([("name", JsonValue.str(run.dataset.name)), ("title", JsonValue.str(run.dataset.title)), ("input", JsonValue.str(run.dataset.input)), ("passages", JsonValue.u64(Dataset.selected(run.dataset, run.passages).len())), ("token_ids", JsonValue.str(if run.dataset.token_ids == Position "position" else "misc-first")), ("first_line", JsonValue.u64(match run.dataset.lines {
+			AllLines => 1
+			Lines(first, _) => first
+		}))])),
 		("steps", JsonValue.list(run.steps.map(|s| JsonValue.object([("kind", JsonValue.str(Steps.name(s.kind))), ("prompt", JsonValue.str(s.prompt_file)), ("max_tokens", JsonValue.u64(s.max_tokens))])))),
 		("limits", JsonValue.object([("attempts", JsonValue.u64(run.attempts)), ("timeout_seconds", JsonValue.u64(run.timeout_seconds)), ("budget_usd", JsonValue.dec(run.budget))])),
 		("started", JsonValue.str(started)),
@@ -194,7 +260,7 @@ Execute :: [].{
 	Ctx : { run : Load.Run, dir : Str, mode : Mode, key : Str }
 
 	## One call through the store. `check` turns the reply's text into an accepted value or a reason to retry.
-	call! : Ctx, Dec, Str, U64, Provider.Call, (Str -> Try(a, Str)) => Try({ value : a, cost : Dec, cached : Bool }, [Failed(Str), Planned(Dec), Stopped({ message : Str, cost : Dec })])
+	call! : Ctx, Dec, Str, U64, Provider.Call, (Str -> Try(a, Str)) => Try({ value : a, cost : Dec, cached : Bool }, [Failed(Str), Planned(Dec), Stopped({ message : Str, cost : Dec }), Exhausted({ message : Str, cost : Dec })])
 	call! = |ctx, spent, kind, index, call, check| {
 		identity = Provider.identity(ctx.run.model, call)
 		hash = Io.sha256!(JsonValue.canonical(identity))?
@@ -208,6 +274,32 @@ Execute :: [].{
 				event!(ctx.dir, kind, item, 0, Bool.True, { input: 0, output: 0, cache_read: 0 }, 0, 0, "accepted", "")?
 			}
 			return Ok({ value, cost: 0, cached: Bool.True })
+		}
+		provisional = "${ctx.dir}/batch/${hash}.json"
+		if ctx.mode != Dry and Io.exists!(provisional) {
+			body = Io.read!(provisional)?
+			match Provider.reply(ctx.run.model, body) {
+				Ok(reply) => {
+					# Batched calls cost half the list price.
+					cost = Provider.cost(ctx.run.model, reply) / 2
+					tokens = { input: reply.input_tokens, output: reply.output_tokens, cache_read: reply.cache_read_tokens }
+					match check(reply.content) {
+						Ok(value) => {
+							Io.write!(stored, JsonValue.pretty(JsonValue.object([("request", identity), ("reply", JsonValue.object([("content", JsonValue.str(reply.content)), ("input_tokens", JsonValue.u64(reply.input_tokens)), ("output_tokens", JsonValue.u64(reply.output_tokens)), ("cache_read_tokens", JsonValue.u64(reply.cache_read_tokens))])), ("cost_usd", JsonValue.dec(cost)), ("latency_ms", JsonValue.u64(0)), ("attempt", JsonValue.u64(1)), ("batch", JsonValue.bool(Bool.True))])))?
+							event!(ctx.dir, kind, item, 1, Bool.False, tokens, cost, 0, "accepted", "batch")?
+							_ = Path.delete!(Path.unix(provisional))
+							return Ok({ value, cost, cached: Bool.False })
+						}
+						Err(message) => {
+							event!(ctx.dir, kind, item, 1, Bool.False, tokens, cost, 0, "rejected", "batch: ${message}")?
+						}
+					}
+				}
+				Err(message) => {
+					event!(ctx.dir, kind, item, 1, Bool.False, { input: 0, output: 0, cache_read: 0 }, 0, 0, "error", "batch: ${message}")?
+				}
+			}
+			_ = Path.rename!(Path.unix(provisional), Path.unix("${ctx.dir}/rejected/${hash}-batch.json"))
 		}
 		if ctx.mode == Dry {
 			tokens = (call.system.to_utf8().len() + call.user.to_utf8().len()) // 3
@@ -266,7 +358,7 @@ Execute :: [].{
 			}
 			$attempt = $attempt + 1
 		}
-		Err(Stopped({ message: "${kind} item ${item.to_str()} failed after ${ctx.run.attempts.to_str()} attempt(s): ${$last}", cost: $cost }))
+		Err(Exhausted({ message: "${kind} item ${item.to_str()} failed after ${ctx.run.attempts.to_str()} attempt(s): ${$last}", cost: $cost }))
 	}
 
 	event! = |dir, kind, item, attempt, cached, tokens, cost, latency, outcome, message|
@@ -292,7 +384,7 @@ Execute :: [].{
 	send! : Provider.Outbound, U64 => Try(Str, Str)
 	send! = |outbound, timeout_seconds| match outbound {
 		Http(h) => {
-			var $request = Request.from_method(POST).with_uri(h.url).with_body(h.body.to_utf8()).with_timeout(TimeoutMilliseconds(timeout_seconds * 1000))
+			var $request = Request.from_method(if h.method == Get GET else POST).with_uri(h.url).with_body(h.body.to_utf8()).with_timeout(TimeoutMilliseconds(timeout_seconds * 1000))
 			for (name, value) in h.headers {
 				$request = $request.add_header(name, value)
 			}

@@ -5,3 +5,5 @@
 /gold/cache/
 /tests/**/runs/
 /tests/echo-model
+/apo.new
+/examples/*/runs/
