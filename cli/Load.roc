@@ -2,11 +2,13 @@
 # its rendered prompts, dataset, and limits. Paths in a file are relative to that file's folder.
 import apo.Conllu
 import apo.Dataset
+import apo.Gold
 import apo.JsonValue
 import apo.Provider
 import apo.Steps
 import apo.Template
 
+import Evaluate
 import Io
 
 Load :: [].{
@@ -23,6 +25,7 @@ Load :: [].{
 		reference : List(List(Str)),
 		attempts : U64,
 		timeout_seconds : U64,
+		skip_failures : Bool,
 		budget : Dec,
 		runs_dir : Str,
 		sources : List((Str, Str)),
@@ -48,6 +51,11 @@ Load :: [].{
 		limits = pipeline.field("limits") ?? JsonValue.object([])
 		attempts = (limits.field("attempts") ?? JsonValue.Number("3")).as_u64() ?? 3
 		timeout_seconds = (limits.field("timeout_seconds") ?? JsonValue.Number("180")).as_u64() ?? 180
+		skip_failures = match (limits.field("on_failure") ?? JsonValue.str("stop")).as_str() ?? "" {
+			"stop" => Bool.False
+			"skip" => Bool.True
+			other => return Err(Failed("${pipeline_path}: limits.on_failure must be stop or skip, not ${other}"))
+		}
 		budget = (json.field("budget_usd") ?? JsonValue.Number("0")).as_dec() ?? 0
 		runs_dir = Io.join(dir, text("runs", "runs"))
 
@@ -98,7 +106,7 @@ Load :: [].{
 					return Err(Failed("${pipeline_path}: no steps"))
 				}
 				label = if variant.label == "" model.name else "${model.name}-${variant.label}"
-				$runs = $runs.append({ experiment: name, label, model, steps: $steps, dataset: dataset.spec, sentences: dataset.sentences, passages: dataset.passages, reference: dataset.reference, attempts, timeout_seconds, budget, runs_dir, sources: $sources })
+				$runs = $runs.append({ experiment: name, label, model, steps: $steps, dataset: dataset.spec, sentences: dataset.sentences, passages: dataset.passages, reference: dataset.reference, attempts, timeout_seconds, skip_failures, budget, runs_dir, sources: $sources })
 			}
 		}
 		for (prompt_name, prompt_text) in prompt_sources!(pipeline, pipeline_path)? {
@@ -120,19 +128,40 @@ Load :: [].{
 	dataset! : Str => Try({ spec : Dataset.Spec, sentences : List(Conllu.Sentence), passages : List(Dataset.Passage), reference : List(List(Str)) }, [Failed(Str)])
 	dataset! = |path| {
 		dir = Io.dir_of(path)
-		raw = Dataset.spec(Io.json!(path)?).map_err(|m| Failed("${path}: ${m}"))?
-		spec = { ..raw, input: Io.join(dir, raw.input), reference: if raw.reference == "" "" else Io.join(dir, raw.reference) }
+		json = Io.json!(path)?
+		# `"gold": { "manifest", "input", "reference" }` reads the input and reference from a gold set's files.
+		from_gold = match json.field("gold") {
+			Ok(g) => {
+				manifest_path = Io.join(dir, (g.field("manifest") ?? JsonValue.str("")).as_str() ?? "")
+				manifest = Gold.manifest(Io.json!(manifest_path)?).map_err(|m| Failed("${manifest_path}: ${m}"))?
+				files = Evaluate.fetch!(manifest)?
+				pick = |key| match files.keep_if(|(n, _)| n == ((g.field(key) ?? JsonValue.str("")).as_str() ?? "")) {
+					[(_, p), ..] => p
+					[] => ""
+				}
+				Ok({ input: pick("input"), reference: pick("reference") })
+			}
+			Err(_) => Err(NoGold)
+		}
+		raw = Dataset.spec(match from_gold {
+			Ok(g) => json.set("input", JsonValue.str(g.input))
+			Err(_) => json
+		}).map_err(|m| Failed("${path}: ${m}"))?
+		spec = match from_gold {
+			Ok(g) => { ..raw, input: g.input, reference: g.reference }
+			Err(_) => { ..raw, input: Io.join(dir, raw.input), reference: if raw.reference == "" "" else Io.join(dir, raw.reference) }
+		}
 		input = Io.read!(spec.input)?
 		sentences = match spec.format {
 			Conllu => Conllu.parse(input).map_err(|e| Failed("${spec.input}:${e.line.to_str()}: ${e.message}"))?
-			Tokens => Dataset.from_tokens(input)
+			Tokens => Dataset.from_tokens(Dataset.slice(spec, input))
 		}
 		passages = match spec.passages {
 			BySentence => Dataset.by_sentence(spec, sentences)
 			Refs(file) => Dataset.from_refs(spec, Io.read!(Io.join(dir, file))?, sentences).map_err(|m| Failed("${file}: ${m}"))?
 			File(file) => Dataset.from_file(Io.json!(Io.join(dir, file))?).map_err(|m| Failed("${file}: ${m}"))?
 		}
-		reference = if spec.reference == "" [] else Dataset.from_tokens(Io.read!(spec.reference)?).map(|s| s.rows.map(|r| r.form))
+		reference = if spec.reference == "" [] else Dataset.from_tokens(Dataset.slice(spec, Io.read!(spec.reference)?)).map(|s| s.rows.map(|r| r.form))
 		Ok({ spec, sentences, passages, reference })
 	}
 }

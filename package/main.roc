@@ -4,7 +4,9 @@ package
 	[
 		Conllu,
 		Dataset,
+		Gold,
 		JsonValue,
+		Metrics,
 		Provider,
 		Steps,
 		Template,

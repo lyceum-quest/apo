@@ -1,0 +1,7 @@
+{
+  "steps": [
+    { "kind": "align", "prompt": "prompts/align.md", "max_tokens": 768 },
+    { "kind": "gloss-tokens", "prompt": "prompts/gloss.md", "max_tokens": 2048 }
+  ],
+  "limits": { "attempts": 2, "timeout_seconds": 300, "on_failure": "skip" }
+}

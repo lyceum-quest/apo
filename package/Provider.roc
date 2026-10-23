@@ -10,7 +10,7 @@ import JsonValue
 Provider :: [].{
 	Protocol : [OpenAiChat, AnthropicMessages, ClaudeCli, Command(List(Str))]
 
-	Settings : { name : Str, protocol : Protocol, base_url : Str, key_env : Str, headers : List((Str, Str)) }
+	Settings : { name : Str, protocol : Protocol, base_url : Str, key_env : Str, headers : List((Str, Str)), batch : Bool }
 
 	Prices : { input : Dec, output : Dec, cache_read : Dec }
 
@@ -19,7 +19,7 @@ Provider :: [].{
 	Call : { system : Str, user : Str, max_tokens : U64 }
 
 	Outbound : [
-		Http({ url : Str, headers : List((Str, Str)), body : Str }),
+		Http({ method : [Get, Post], url : Str, headers : List((Str, Str)), body : Str }),
 		Exec({ argv : List(Str), env : List((Str, Str)), cwd : Str, stdin : Str }),
 	]
 
@@ -59,7 +59,11 @@ Provider :: [].{
 				(_, url) => url
 			}
 			headers = (p.field("headers") ?? JsonValue.object([])).fields().map(|(k, v)| (k, v.as_str() ?? ""))
-			$out = $out.append({ name, protocol, base_url: base.drop_suffix("/"), key_env: text("key_env"), headers })
+			batch = (p.field("batch") ?? JsonValue.bool(Bool.False)).as_bool() ?? Bool.False
+			if batch and protocol != AnthropicMessages {
+				return Err("provider ${name}: batch needs the anthropic-messages protocol")
+			}
+			$out = $out.append({ name, protocol, base_url: base.drop_suffix("/"), key_env: text("key_env"), headers, batch })
 		}
 		Ok($out)
 	}
@@ -111,7 +115,7 @@ Provider :: [].{
 				m.options,
 			)
 			auth = if key == "" [] else [("Authorization", "Bearer ${key}")]
-			Http({ url: "${m.provider.base_url}/chat/completions", headers: auth.concat(m.provider.headers).append(("Content-Type", "application/json")), body: JsonValue.encode(body) })
+			Http({ method: Post, url: "${m.provider.base_url}/chat/completions", headers: auth.concat(m.provider.headers).append(("Content-Type", "application/json")), body: JsonValue.encode(body) })
 		}
 		AnthropicMessages => {
 			system = JsonValue.list([JsonValue.object([("type", JsonValue.str("text")), ("text", JsonValue.str(c.system)), ("cache_control", JsonValue.object([("type", JsonValue.str("ephemeral"))]))])])
@@ -124,7 +128,7 @@ Provider :: [].{
 				]),
 				m.options,
 			)
-			Http({ url: "${m.provider.base_url}/v1/messages", headers: [("x-api-key", key), ("anthropic-version", "2023-06-01")].concat(m.provider.headers).append(("Content-Type", "application/json")), body: JsonValue.encode(body) })
+			Http({ method: Post, url: "${m.provider.base_url}/v1/messages", headers: [("x-api-key", key), ("anthropic-version", "2023-06-01")].concat(m.provider.headers).append(("Content-Type", "application/json")), body: JsonValue.encode(body) })
 		}
 		ClaudeCli => Exec({
 			argv: ["claude", "-p", "--model", m.id, "--system-prompt", c.system, "--output-format", "json", "--tools", "", "--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence", "--setting-sources", "", c.user],
@@ -134,6 +138,47 @@ Provider :: [].{
 		})
 		Command(argv) => Exec({ argv, env: [], cwd: "", stdin: JsonValue.encode(JsonValue.object([("model", JsonValue.str(m.id)), ("options", m.options), ("system", JsonValue.str(c.system)), ("user", JsonValue.str(c.user)), ("max_tokens", JsonValue.u64(c.max_tokens))])) })
 	}
+
+	## The Message Batches API (half price): one request carrying many calls, each under a custom ID.
+	batch_submit : Model, List((Str, Call)), Str -> Outbound
+	batch_submit = |m, calls, key| {
+		requests = calls.map(|(id, c)| match outbound(m, c, key) {
+			Http(h) => JsonValue.object([("custom_id", JsonValue.str(id)), ("params", JsonValue.decode(h.body) ?? JsonValue.null)])
+			Exec(_) => JsonValue.null
+		})
+		Http({ method: Post, url: "${m.provider.base_url}/v1/messages/batches", headers: anthropic_headers(m, key), body: JsonValue.encode(JsonValue.object([("requests", JsonValue.list(requests))])) })
+	}
+
+	batch_poll : Model, Str, Str -> Outbound
+	batch_poll = |m, id, key| Http({ method: Get, url: "${m.provider.base_url}/v1/messages/batches/${id}", headers: anthropic_headers(m, key), body: "" })
+
+	batch_fetch : Model, Str, Str -> Outbound
+	batch_fetch = |m, url, key| Http({ method: Get, url, headers: anthropic_headers(m, key), body: "" })
+
+	anthropic_headers : Model, Str -> List((Str, Str))
+	anthropic_headers = |m, key| [("x-api-key", key), ("anthropic-version", "2023-06-01")].concat(m.provider.headers).append(("Content-Type", "application/json"))
+
+	## A batch's ID, whether it has ended, and where its results are.
+	batch_status : Str -> Try({ id : Str, ended : Bool, results_url : Str }, Str)
+	batch_status = |body| {
+		json = JsonValue.decode(body)?
+		text = |key| (json.field(key) ?? JsonValue.str("")).as_str() ?? ""
+		if text("id") == "" {
+			return Err("the batch reply has no id: ${body}")
+		}
+		Ok({ id: text("id"), ended: text("processing_status") == "ended", results_url: text("results_url") })
+	}
+
+	## A batch's results (JSONL): each custom ID with its message as a Messages reply body, or why it has none.
+	batch_results : Str -> List((Str, Try(Str, Str)))
+	batch_results = |jsonl| jsonl.split_on("\n").keep_oks(|line| JsonValue.decode(line)).map(|r| {
+		id = (r.field("custom_id") ?? JsonValue.str("")).as_str() ?? ""
+		result = r.field("result") ?? JsonValue.object([])
+		match (result.field("type") ?? JsonValue.str("")).as_str() ?? "" {
+			"succeeded" => (id, Ok(JsonValue.encode(result.field("message") ?? JsonValue.null)))
+			other => (id, Err("batch result ${other}: ${JsonValue.encode(result.field("error") ?? JsonValue.null)}"))
+		}
+	})
 
 	message : Str, Str -> JsonValue
 	message = |role, content| JsonValue.object([("role", JsonValue.str(role)), ("content", JsonValue.str(content))])
@@ -217,7 +262,7 @@ Provider :: [].{
 	}
 }
 
-local = { name: "local", provider: { name: "local", protocol: OpenAiChat, base_url: "http://127.0.0.1:8080/v1", key_env: "", headers: [] }, id: "qwen", options: JsonValue.object([("temperature", JsonValue.Number("0"))]), prices: { input: 0, output: 0, cache_read: 0 } }
+local = { name: "local", provider: { name: "local", protocol: OpenAiChat, base_url: "http://127.0.0.1:8080/v1", key_env: "", headers: [], batch: Bool.False }, id: "qwen", options: JsonValue.object([("temperature", JsonValue.Number("0"))]), prices: { input: 0, output: 0, cache_read: 0 } }
 
 expect match Provider.outbound(local, { system: "S", user: "U", max_tokens: 10 }, "") {
 	Http(h) => h.url == "http://127.0.0.1:8080/v1/chat/completions" and h.body == "{\"model\":\"qwen\",\"max_tokens\":10,\"messages\":[{\"role\":\"system\",\"content\":\"S\"},{\"role\":\"user\",\"content\":\"U\"}],\"temperature\":0}" and h.headers == [("Content-Type", "application/json")]
@@ -238,3 +283,15 @@ expect {
 }
 
 expect Provider.settings(JsonValue.decode("{\"providers\": {\"x\": {\"protocol\": \"command\", \"command\": [\"echo\"]}}}") ?? JsonValue.null).map_ok(|ps| ps.map(|p| p.protocol)) == Ok([Command(["echo"])])
+
+expect Provider.batch_status("{\"id\":\"msgbatch_1\",\"processing_status\":\"ended\",\"results_url\":\"https://x/results\"}") == Ok({ id: "msgbatch_1", ended: Bool.True, results_url: "https://x/results" })
+
+expect Provider.batch_results("{\"custom_id\":\"a\",\"result\":{\"type\":\"succeeded\",\"message\":{\"content\":[]}}}\n{\"custom_id\":\"b\",\"result\":{\"type\":\"errored\",\"error\":{\"type\":\"x\"}}}\n").map(|(id, r)| (id, r.is_ok())) == [("a", Bool.True), ("b", Bool.False)]
+
+expect {
+	anthropic = { ..local, provider: { ..local.provider, protocol: AnthropicMessages, base_url: "https://api.anthropic.com", batch: Bool.True } }
+	match Provider.batch_submit(anthropic, [("h1", { system: "S", user: "U", max_tokens: 5 })], "k") {
+		Http(h) => h.url == "https://api.anthropic.com/v1/messages/batches" and h.body.contains("\"custom_id\":\"h1\"") and h.body.contains("\"cache_control\"")
+		Exec(_) => Bool.False
+	}
+}
