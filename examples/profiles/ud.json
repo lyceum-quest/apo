@@ -1,0 +1,10 @@
+{
+  "name": "ud",
+  "required_comments": ["sent_id", "text"],
+  "unique_comments": ["sent_id"],
+  "upos": ["ADJ", "ADP", "ADV", "AUX", "CCONJ", "DET", "INTJ", "NOUN", "NUM", "PART", "PRON", "PROPN", "PUNCT", "SCONJ", "SYM", "VERB", "X"],
+  "deprels": ["acl", "advcl", "advmod", "amod", "appos", "aux", "case", "cc", "ccomp", "clf", "compound", "conj", "cop", "csubj", "dep", "det", "discourse", "dislocated", "expl", "fixed", "flat", "goeswith", "iobj", "list", "mark", "nmod", "nsubj", "nummod", "obj", "obl", "orphan", "parataxis", "punct", "reparandum", "root", "vocative", "xcomp"],
+  "single_root": true,
+  "root_deprel": "root",
+  "feats_sorted": true
+}
