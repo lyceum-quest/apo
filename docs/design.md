@@ -141,7 +141,7 @@ The run directory is apo's only interface with the outside: consumers import it,
 runs/<run-id>/
   manifest.json        apo version, resolved configuration, prompt and input hashes, model, limits, totals
   config/              snapshot of every configuration file and prompt used
-  store/<hash>.json    each request and its reply, keyed by the SHA-256 of the canonical request
+  (shared by the experiment's runs: ../store/<hash>.json, each request and its reply by the SHA-256 of the request)
   events.jsonl         one line per call: step, item, attempt, cache hit, tokens, cost, latency, outcome
   output/
     <dataset>.conllu   tokens with glosses and sentence translations

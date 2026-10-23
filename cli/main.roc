@@ -36,6 +36,7 @@ usage =
 	\\  compare <run-dir>... --judge <judge.json> --out <dir>          rank runs by pairwise preference (see --help)
 	\\  export <run-dir> <work-dir>                                    write a run as an archive work folder
 	\\  adopt <work-dir> [--runs <dir>]                                wrap a pre-apo work folder as a run
+	\\  seed <experiment.json> --from <work-dir> [--only <label>]     fill a run's store from a pre-apo work folder
 	\\
 	\\Run `apo <command> --help` for a command's options.
 
@@ -69,6 +70,7 @@ run! = |shown| match shown {
 	["compare", .. as rest] => compare!(rest)
 	["export", .. as rest] => export!(rest)
 	["adopt", .. as rest] => adopt!(rest)
+	["seed", .. as rest] => seed!(rest)
 	["--version"] => Stdout.line!(version)
 	["--help"] | ["-h"] | ["help"] | [] => Stdout.line!(usage)
 	[command, ..] => Err(Usage("apo: unknown command ${command}\n\n${usage}"))
@@ -261,4 +263,18 @@ adopt! = |words| {
 		[work] if !has_flag(parsed, "--help") => Archive.adopt!(work, option(parsed, "--runs") ?? "runs", version)
 		_ => Stdout.line!("usage: apo adopt <work-dir> [--runs <dir>]\n\nWraps a work folder made before apo (output.conllu, units.jsonl, config.json) as a run under <dir>/adopted/,\nmarked not replayable, so apo eval and apo compare can score it next to new runs.")
 	}
+}
+
+seed! = |words| {
+	parsed = options(words, ["--help"])?
+	work = match option(parsed, "--from") {
+		Ok(w) if !has_flag(parsed, "--help") => w
+		_ => return Stdout.line!("usage: apo seed <experiment.json> --from <work-dir> [--only <label>]\n\nFills each run's store from an archive work folder made before apo (output.conllu, units.jsonl): every call the\nrun would make is answered with what the work already holds, checked like any reply, until the work runs out.\nA later apo run then calls the model only for what the work lacks.")
+	}
+	for run in runs!(parsed)? {
+		report = Execute.run!(run, version, Seed(work))?
+		stored = report.steps.map(|s| s.cached).sum()
+		Stdout.line!("${report.label}: ${stored.to_str()} item(s) from ${work}; ${report.status}; ${report.dir}")?
+	}
+	Ok({})
 }

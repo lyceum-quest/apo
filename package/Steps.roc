@@ -190,7 +190,7 @@ Steps :: [].{
 	}
 }
 
-oga = { name: "t", title: "t", input: "x", format: Conllu, passages: BySentence, token_ids: MiscFirst, omitted_prefix: "e_", reference: "", limit: All, lines: AllLines }
+oga = { name: "t", title: "t", input: "x", format: Conllu, passages: BySentence, label_separator: ".", token_ids: MiscFirst, omitted_prefix: "e_", reference: "", limit: All, lines: AllLines }
 
 first_sentence = |text| match Conllu.parse(text) {
 	Ok([s, ..]) => s
