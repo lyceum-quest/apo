@@ -2,6 +2,7 @@
 app [main!] {
 	pf: platform "https://github.com/roc-lang/basic-cli/releases/download/0.26.0/GddgvsGjiNXrHFW6au5i5dUDbTs8FinQdrgE2Gqmw53t.tar.zst",
 	apo: "../package/main.roc",
+	http: "https://github.com/roc-lang/http/releases/download/1.0.0/6ZUwqYhCS8PU9Mo6MF7oV82ET2o7KYb57CLKDq4cq4sS.tar.zst",
 }
 
 import pf.OsStr
@@ -10,6 +11,14 @@ import pf.Stderr
 import pf.Stdout
 import apo.JsonValue
 import apo.Validate
+
+import Execute
+import Io
+import Load
+
+import "../VERSION" as raw_version : Str
+
+version = raw_version.trim()
 
 usage =
 	\\usage: apo <command> [options]
@@ -42,6 +51,9 @@ main! = |args| {
 
 run! = |shown| match shown {
 	["validate", .. as rest] => validate!(rest)
+	["plan", .. as rest] => plan!(rest)
+	["run", .. as rest] => run_experiment!(rest)
+	["--version"] => Stdout.line!(version)
 	["--help"] | ["-h"] | ["help"] | [] => Stdout.line!(usage)
 	[command, ..] => Err(Usage("apo: unknown command ${command}\n\n${usage}"))
 }
@@ -114,4 +126,49 @@ validate! = |words| {
 		_ = Stderr.line!("${$total.to_str()} problem(s)")
 		Err(Invalid)
 	}
+}
+
+## The runs an experiment resolves to, optionally just the one labelled `--only`.
+runs! : { named : List((Str, Str)), positional : List(Str) } => Try(List(Load.Run), [Usage(Str), Failed(Str)])
+runs! = |parsed| {
+	path = parsed.positional.first() ?? return Err(Usage("apo: name an experiment.json"))
+	loaded = Load.experiment!(path)?
+	chosen = match option(parsed, "--only") {
+		Ok(label) => loaded.runs.keep_if(|r| r.label == label)
+		Err(_) => loaded.runs
+	}
+	if chosen.is_empty() Err(Failed("${path}: no runs (check models and --only)")) else Ok(chosen)
+}
+
+plan! = |words| {
+	parsed = options(words, ["--help"])?
+	if has_flag(parsed, "--help") {
+		return Stdout.line!("usage: apo plan <experiment.json> [--only <label>]\n\nLists each run's directory and, per step, how many calls are answered by its store and how many would go to the model, with an upper-bound cost from the models' prices. Makes no calls.")
+	}
+	for run in runs!(parsed)? {
+		report = Execute.run!(run, version, Dry)?
+		Stdout.line!("${report.label}  ${report.dir}")?
+		for s in report.steps {
+			Stdout.line!("  ${s.kind}: ${s.items.to_str()} item(s), ${s.cached.to_str()} stored, ${s.planned.to_str()} to call (≤ $${Execute.money(s.estimate)})")?
+		}
+	}
+	Ok({})
+}
+
+run_experiment! = |words| {
+	parsed = options(words, ["--paid", "--help"])?
+	if has_flag(parsed, "--help") {
+		return Stdout.line!("usage: apo run <experiment.json> [--paid] [--only <label>]\n\nRuns every model and prompt variant, resuming from each run's store. Calls to providers with an API key need --paid. A run stops at its budget or at an item that fails its checks every attempt; rerunning resumes it.")
+	}
+	var $failed = Bool.False
+	for run in runs!(parsed)? {
+		report = Execute.run!(run, version, Live({ paid: has_flag(parsed, "--paid") }))?
+		called = report.steps.map(|s| s.called).sum()
+		cached = report.steps.map(|s| s.cached).sum()
+		Stdout.line!("${report.label}: ${report.status}; ${called.to_str()} call(s), ${cached.to_str()} from the store, $${Execute.money(report.cost)} spent; ${report.dir}")?
+		if report.status != "completed" {
+			$failed = Bool.True
+		}
+	}
+	if $failed Err(Invalid) else Ok({})
 }

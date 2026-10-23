@@ -1,0 +1,9 @@
+{
+  "name": "crito",
+  "title": "Plato, Crito",
+  "input": "crito-sample.conllu",
+  "token_ids": "misc-first",
+  "omitted_misc_prefix": "e_",
+  "passages": { "kind": "file", "path": "passages.json" },
+  "limit": 2
+}

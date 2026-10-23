@@ -1,0 +1,5 @@
+{
+  "providers": {
+    "echo": { "protocol": "command", "command": ["../echo-model"] }
+  }
+}

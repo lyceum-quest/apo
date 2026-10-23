@@ -3,7 +3,11 @@
 package
 	[
 		Conllu,
+		Dataset,
 		JsonValue,
+		Provider,
+		Steps,
+		Template,
 		Validate,
 	]
 	{}
