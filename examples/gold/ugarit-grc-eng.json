@@ -1,0 +1,12 @@
+{
+  "name": "ugarit-grc-eng",
+  "kind": "alignment",
+  "description": "Word alignments of Ancient Greek and English by two domain experts on the Ugarit editor (inter-annotator agreement above 80%): Iliad 1 (Murray 1924), Plato's Crito (Fowler 1966), Xenophon's Cyropaedia 1 (Miller 1914). 274 sentences, 6,036 sure and 1,388 possible links.",
+  "license": "CC BY-SA 4.0 (repository LICENSE-CC-BY-SA.md and README); the Zenodo deposit (doi:10.5281/zenodo.7362097) lists CC BY 4.0",
+  "citation": "Palladino, C., Shamsian, F., Yousef, T., Wright, D. J., d'Orange Ferreira, A., & Ferreira dos Reis, M. (2023). Translation Alignment for Ancient Greek: Annotation Guidelines and Gold Standards. Journal of Open Humanities Data, 9(1), 22. https://doi.org/10.5334/johd.131",
+  "files": {
+    "source": { "url": "https://raw.githubusercontent.com/UgaritAlignment/Alignment-Gold-Standards/71ecd92479ae7025a6d3a3b340edf14ffe148281/grc-eng/grc.txt", "sha256": "a173c8ffcfd09bb5762f490b21fe4664806d27ea88f55e214b499f241d011b0d" },
+    "target": { "url": "https://raw.githubusercontent.com/UgaritAlignment/Alignment-Gold-Standards/71ecd92479ae7025a6d3a3b340edf14ffe148281/grc-eng/eng.txt", "sha256": "277bc4b86763bebc3b183522a79f5305ddf8912635820877b8b354748badfc3d" },
+    "links": { "url": "https://raw.githubusercontent.com/UgaritAlignment/Alignment-Gold-Standards/71ecd92479ae7025a6d3a3b340edf14ffe148281/grc-eng/alignment_grc_eng.txt", "sha256": "b6b2745a2c671c1d0e035b29ee90c0df3e4c9a1393136dd38871d55c95c35f11" }
+  }
+}
