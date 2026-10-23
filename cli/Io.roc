@@ -75,6 +75,12 @@ Io :: [].{
 	key! : Provider.Model => Str
 	key! = |model| if model.provider.key_env == "" "" else Env.var_str!(OsStr.from_str(model.provider.key_env)) ?? ""
 
+	is_terminal! : U64 => Bool
+	is_terminal! = |fd| match Cmd.new("test").args(["-t", OsStr.from_str(fd.to_str())]).run!() {
+		Ok(output) => output.status == Exited(0)
+		Err(_) => Bool.False
+	}
+
 	os : Str -> OsStr
 	os = |s| OsStr.from_str(s)
 }

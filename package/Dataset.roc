@@ -12,6 +12,7 @@ Dataset :: [].{
 		input : Str,
 		format : [Conllu, Tokens],
 		passages : [BySentence, Refs(Str), File(Str)],
+		label_separator : Str,
 		token_ids : [Position, MiscFirst],
 		omitted_prefix : Str,
 		reference : Str,
@@ -62,7 +63,11 @@ Dataset :: [].{
 			Ok(_) => return Err("lines must be [first, last], 1-based")
 			Err(_) => AllLines
 		}
-		Ok({ name, title: text("title", name)?, input, format, passages, token_ids, omitted_prefix: text("omitted_misc_prefix", "")?, reference: text("reference", "")?, limit, lines })
+		separator = match json.field("passages") {
+			Ok(p) => (p.field("label_separator") ?? JsonValue.str(".")).as_str() ?? "."
+			Err(_) => "."
+		}
+		Ok({ name, title: text("title", name)?, input, format, passages, label_separator: separator, token_ids, omitted_prefix: text("omitted_misc_prefix", "")?, reference: text("reference", "")?, limit, lines })
 	}
 
 	## The lines a `lines` range keeps of a line-per-sentence file (all of them without one).
@@ -138,7 +143,7 @@ Dataset :: [].{
 				ref = $refs.get(token) ?? return Err("token ${token} has no citation")
 				$out = match $out.last() {
 					Ok(open) if open.ref == ref => $out.drop_last(1).append({ ..open, tokens: open.tokens.append(token) })
-					_ => $out.append({ ref, label: ref, tokens: [token] })
+					_ => $out.append({ ref, label: ref.replace_each(".", s.label_separator), tokens: [token] })
 				}
 			}
 			$i = $i + 1
@@ -184,7 +189,7 @@ Dataset :: [].{
 	}
 }
 
-oga = { name: "t", title: "t", input: "x", format: Conllu, passages: BySentence, token_ids: MiscFirst, omitted_prefix: "e_", reference: "", limit: All, lines: AllLines }
+oga = { name: "t", title: "t", input: "x", format: Conllu, passages: BySentence, label_separator: ".", token_ids: MiscFirst, omitted_prefix: "e_", reference: "", limit: All, lines: AllLines }
 
 two = Conllu.parse("1\ta\ta\tX\t_\t_\t0\troot\t_\tt_1\n2\tb\tb\tX\t_\t_\t1\tdep\t_\te_1\n3\tc\tc\tX\t_\t_\t1\tdep\t_\tt_2\n\n1\td\td\tX\t_\t_\t0\troot\t_\tt_3\n\n") ?? []
 

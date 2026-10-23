@@ -21,7 +21,8 @@ import Io
 import Load
 
 Execute :: [].{
-	Mode : [Live({ paid : Bool }), Dry]
+	## Live calls models; Dry only counts calls; Seed answers calls from an archive work folder's outputs.
+	Mode : [Live({ paid : Bool }), Dry, Seed(Str)]
 
 	StepReport : { kind : Str, items : U64, cached : U64, called : U64, failed : U64, planned : U64, estimate : Dec }
 
@@ -67,6 +68,16 @@ Execute :: [].{
 			Io.write!("${dir}/manifest.json", JsonValue.pretty(manifest(run, version, located.id, started, "running", $spent)))?
 		}
 		ctx = { run, dir, mode, key: Io.key!(run.model) }
+		# Progress redraws one line, so it is shown only on a terminal.
+		terminal = Io.is_terminal!(2)
+		work = match mode {
+			Seed(folder) => {
+				parsed = Conllu.parse(Io.read!("${folder}/output.conllu")?).map_err(|e| Failed("${folder}: ${e.message}"))?
+				units = (Io.read!("${folder}/units.jsonl") ?? "").split_on("\n").keep_oks(|l| JsonValue.decode(l))
+				{ folder, sentences: parsed, units }
+			}
+			_ => { folder: "", sentences: [], units: [] }
+		}
 		for step in run.steps {
 			kind = Steps.name(step.kind)
 			var $report = { kind, items: 0, cached: 0, called: 0, failed: 0, planned: 0, estimate: 0 }
@@ -77,7 +88,7 @@ Execute :: [].{
 			if step.kind == Align and run.reference.len() < items {
 				return Err(Failed("align needs a reference line for each of ${items.to_str()} sentences; the dataset has ${run.reference.len().to_str()}"))
 			}
-			if mode != Dry and run.model.provider.batch {
+			if is_live(mode) and run.model.provider.batch {
 				var $calls = []
 				var $n = 0
 				while $n < items {
@@ -90,13 +101,20 @@ Execute :: [].{
 			while $i < items and $status == "completed" {
 				sentence = $sentences.get($i) ?? { line: 0, comments: [], rows: [] }
 				label = "${kind} ${($i + 1).to_str()}/${items.to_str()}"
-				_ = if mode != Dry Stderr.write!("\r\u(1b)[2K${run.label}: ${label} · $${money($spent)}") else Ok({})
+				_ = if mode != Dry and terminal Stderr.write!("\r\u(1b)[2K${run.label}: ${label} · $${money($spent)}") else Ok({})
 				call = request(run, step, $sentences, selected, $i)
-				result = match step.kind {
+				seeded = match mode {
+					Seed(_) => seed!(ctx, step.kind, request(run, step, $sentences, selected, $i), work, $i, selected.get($i) ?? { ref: "", label: "", tokens: [] })
+					_ => Ok({})
+				}
+				result = match seeded {
+					Err(message) => Err(Stopped({ message, cost: 0 }))
+					Ok(_) => match step.kind {
 					TranslateSentence => call!(ctx, $spent, kind, $i, call, |content| Steps.check_translation(Steps.reply_object(content)?)).map_ok(|r| { cost: r.cost, cached: r.cached, apply: TranslatedSentence(r.value) })
 					GlossTokens => call!(ctx, $spent, kind, $i, call, |content| Steps.check_glosses(run.dataset, sentence, step.punctuation, Steps.reply_object(content)?)).map_ok(|r| { cost: r.cost, cached: r.cached, apply: Glossed(r.value) })
 					TranslatePassage => call!(ctx, $spent, kind, $i, call, |content| Steps.check_translation(Steps.reply_object(content)?)).map_ok(|r| { cost: r.cost, cached: r.cached, apply: TranslatedPassage(r.value) })
 					Align => call!(ctx, $spent, kind, $i, call, |content| Steps.check_links(Steps.reply_object(content)?, overt(run.dataset, sentence).len(), (run.reference.get($i) ?? []).len())).map_ok(|r| { cost: r.cost, cached: r.cached, apply: Aligned(r.value) })
+				}
 				}
 				$report = { ..$report, items: $report.items + 1 }
 				match result {
@@ -146,10 +164,58 @@ Execute :: [].{
 			}
 		}
 		if mode != Dry {
-			_ = Stderr.write!("\r\u(1b)[2K")
+			_ = if terminal Stderr.write!("\r\u(1b)[2K") else Ok({})
 			Io.write!("${dir}/manifest.json", JsonValue.pretty(manifest(run, version, located.id, started, $status, $spent)))?
 		}
 		Ok({ label: run.label, dir, status: $status, steps: $reports, cost: $spent })
+	}
+
+	## The experiment's folder, whose store every run shares: a reply is reused by any run that makes the same request,
+	## so raising a limit or adding a step costs only the new calls.
+	shared : Ctx -> Str
+	shared = |ctx| "${ctx.run.runs_dir}/${ctx.run.experiment}"
+
+	is_live : Mode -> Bool
+	is_live = |mode| match mode {
+		Live(_) => Bool.True
+		_ => Bool.False
+	}
+
+	## Stores, as the reply to `call`, what an archive work folder holds for item `i`: a sentence's translations or
+	## glosses, or a passage's translations. The work's sentence must have the dataset sentence's forms.
+	seed! = |ctx, kind, call, work, i, passage| {
+		identity = Provider.identity(ctx.run.model, call)
+		hash = Io.sha256!(JsonValue.canonical(identity)).map_err(|_| "cannot hash")?
+		stored = "${shared(ctx)}/store/${hash}.json"
+		if Io.exists!(stored) {
+			return Ok({})
+		}
+		source = ctx.run.sentences.get(i) ?? { line: 0, comments: [], rows: [] }
+		from_work = if kind == TranslatePassage source else work.sentences.get(i) ?? return Err("the work has no sentence ${(i + 1).to_str()}")
+		if from_work.rows.map(|r| r.form) != source.rows.map(|r| r.form) {
+			return Err("sentence ${(i + 1).to_str()} of the work differs from the dataset")
+		}
+		translation = |prose, literal| JsonValue.object([("prose_translation", JsonValue.str(prose)), ("literal_translation", JsonValue.str(literal))])
+		content = match kind {
+			TranslateSentence => match (Conllu.comment(from_work, "prose_translation"), Conllu.comment(from_work, "literal_translation")) {
+				(Ok(p), Ok(l)) => translation(p, l)
+				_ => return Err("sentence ${(i + 1).to_str()} of the work has no translations")
+			}
+			GlossTokens => {
+				glossed = from_work.rows.keep_oks(|r| Conllu.misc(r, "gloss").map_ok(|g| JsonValue.object([("id", JsonValue.str(r.id)), ("gloss", JsonValue.str(g))])))
+				if glossed.is_empty() {
+					return Err("sentence ${(i + 1).to_str()} of the work has no glosses")
+				}
+				JsonValue.object([("glosses", JsonValue.list(glossed))])
+			}
+			TranslatePassage => match work.units.keep_if(|u| (u.field("ref") ?? JsonValue.null).as_str() == Ok(passage.ref)) {
+				[u, ..] => translation((u.field("prose") ?? JsonValue.str("")).as_str() ?? "", (u.field("literal") ?? JsonValue.str("")).as_str() ?? "")
+				[] => return Err("the work has no passage ${passage.ref}")
+			}
+			Align => return Err("alignments cannot be seeded")
+		}
+		record = JsonValue.object([("request", identity), ("reply", JsonValue.object([("content", JsonValue.str(JsonValue.encode(content))), ("input_tokens", JsonValue.u64(0)), ("output_tokens", JsonValue.u64(0)), ("cache_read_tokens", JsonValue.u64(0))])), ("cost_usd", JsonValue.dec(0)), ("seeded_from", JsonValue.str(work.folder))])
+		Io.write!(stored, JsonValue.pretty(record)).map_err(|_| "cannot write ${stored}")
 	}
 
 	## The call for item `i` of a step, given the sentences as earlier steps left them.
@@ -172,7 +238,7 @@ Execute :: [].{
 		var $pending = []
 		for c in calls {
 			hash = Io.sha256!(JsonValue.canonical(Provider.identity(ctx.run.model, c)))?
-			if !Io.exists!("${ctx.dir}/store/${hash}.json") and !Io.exists!("${ctx.dir}/batch/${hash}.json") and !$pending.any(|(h, _)| h == hash) {
+			if !Io.exists!("${shared(ctx)}/store/${hash}.json") and !Io.exists!("${shared(ctx)}/batch/${hash}.json") and !$pending.any(|(h, _)| h == hash) {
 				$pending = $pending.append((hash, c))
 			}
 		}
@@ -184,7 +250,7 @@ Execute :: [].{
 		}
 		_ = Stderr.line!("${ctx.run.label}: submitting ${$pending.len().to_str()} ${kind} call(s) as a batch")
 		submitted = Provider.batch_status(send!(Provider.batch_submit(ctx.run.model, $pending, ctx.key), ctx.run.timeout_seconds).map_err(|e| Failed(e))?).map_err(|e| Failed(e))?
-		Io.write!("${ctx.dir}/batch/${submitted.id}.submitted", "")?
+		Io.write!("${shared(ctx)}/batch/${submitted.id}.submitted", "")?
 		var $status = submitted
 		while !$status.ended {
 			_ = Sleep.millis!(30000)
@@ -193,7 +259,7 @@ Execute :: [].{
 		results = send!(Provider.batch_fetch(ctx.run.model, $status.results_url, ctx.key), ctx.run.timeout_seconds).map_err(|e| Failed(e))?
 		for (hash, outcome) in Provider.batch_results(results) {
 			match outcome {
-				Ok(body) => Io.write!("${ctx.dir}/batch/${hash}.json", body)?
+				Ok(body) => Io.write!("${shared(ctx)}/batch/${hash}.json", body)?
 				Err(message) => event!(ctx.dir, kind, 0, 1, Bool.False, { input: 0, output: 0, cache_read: 0 }, 0, 0, "error", message)?
 			}
 		}
@@ -264,7 +330,7 @@ Execute :: [].{
 	call! = |ctx, spent, kind, index, call, check| {
 		identity = Provider.identity(ctx.run.model, call)
 		hash = Io.sha256!(JsonValue.canonical(identity))?
-		stored = "${ctx.dir}/store/${hash}.json"
+		stored = "${shared(ctx)}/store/${hash}.json"
 		item = index + 1
 		if Io.exists!(stored) {
 			record = Io.json!(stored)?
@@ -275,7 +341,7 @@ Execute :: [].{
 			}
 			return Ok({ value, cost: 0, cached: Bool.True })
 		}
-		provisional = "${ctx.dir}/batch/${hash}.json"
+		provisional = "${shared(ctx)}/batch/${hash}.json"
 		if ctx.mode != Dry and Io.exists!(provisional) {
 			body = Io.read!(provisional)?
 			match Provider.reply(ctx.run.model, body) {
@@ -300,6 +366,9 @@ Execute :: [].{
 				}
 			}
 			_ = Path.rename!(Path.unix(provisional), Path.unix("${ctx.dir}/rejected/${hash}-batch.json"))
+		}
+		if ctx.mode != Dry and !is_live(ctx.mode) {
+			return Err(Stopped({ message: "item ${item.to_str()} of ${kind} is not in the seeding work", cost: 0 }))
 		}
 		if ctx.mode == Dry {
 			tokens = (call.system.to_utf8().len() + call.user.to_utf8().len()) // 3

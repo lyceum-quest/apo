@@ -107,7 +107,7 @@ Compare :: [].{
 			label: model.name,
 			model,
 			steps: [],
-			dataset: { name: "compare", title: "", input: "", format: Tokens, passages: BySentence, token_ids: Position, omitted_prefix: "", reference: "", limit: All, lines: AllLines },
+			dataset: { name: "compare", title: "", input: "", format: Tokens, passages: BySentence, label_separator: ".", token_ids: Position, omitted_prefix: "", reference: "", limit: All, lines: AllLines },
 			sentences: [],
 			passages: [],
 			reference: [],
