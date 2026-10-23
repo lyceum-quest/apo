@@ -1,0 +1,9 @@
+{
+  "name": "echo",
+  "models": [
+    { "name": "echo", "provider": "echo", "id": "echo-1" },
+    { "name": "echo-copier", "provider": "echo", "id": "echo-1", "options": { "flaw": "copy" } }
+  ],
+  "variables": { "context": { "text": "A Platonic dialogue." } },
+  "budget_usd": 1
+}

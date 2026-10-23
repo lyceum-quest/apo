@@ -3,3 +3,5 @@
 /.kai/*
 !/.kai/lock.json
 /gold/cache/
+/tests/**/runs/
+/tests/echo-model

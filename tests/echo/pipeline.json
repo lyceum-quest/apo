@@ -1,0 +1,8 @@
+{
+  "steps": [
+    { "kind": "translate-sentence", "prompt": "prompts/translate.md", "max_tokens": 1024 },
+    { "kind": "gloss-tokens", "prompt": "prompts/gloss.md", "max_tokens": 2048 },
+    { "kind": "translate-passage", "prompt": "prompts/passage.md", "max_tokens": 1024 }
+  ],
+  "limits": { "attempts": 2, "timeout_seconds": 30 }
+}
