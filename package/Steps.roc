@@ -155,10 +155,12 @@ Steps :: [].{
 
 	merge_glosses : Conllu.Sentence, List((Str, Str)) -> Conllu.Sentence
 	merge_glosses = |s, glosses| {
-		rows = s.rows.map(|r| match glosses.keep_if(|(id, _)| id == r.id) {
-			[(_, g), ..] => Conllu.set_misc(r, "gloss", g)
-			[] => r
-		})
+		rows = s.rows.map(
+			|r| match glosses.keep_if(|(id, _)| id == r.id) {
+				[(_, g), ..] => Conllu.set_misc(r, "gloss", g)
+				[] => r
+			},
+		)
 		{ ..s, rows }
 	}
 

@@ -2,8 +2,8 @@
 # with a well-formed reply built from the request (glosses `gloss-<form>`, translations naming the token count,
 # alignment links pairing equal positions). Setting `options.flaw` to `copy` makes its first gloss copy the form.
 app [main!] {
-	pf: platform "https://github.com/roc-lang/basic-cli/releases/download/0.26.0/GddgvsGjiNXrHFW6au5i5dUDbTs8FinQdrgE2Gqmw53t.tar.zst",
 	apo: "../package/main.roc",
+	pf: platform "https://github.com/roc-lang/basic-cli/releases/download/0.26.0/GddgvsGjiNXrHFW6au5i5dUDbTs8FinQdrgE2Gqmw53t.tar.zst",
 }
 
 import pf.Stdin
@@ -20,7 +20,7 @@ main! = |_args| {
 	content = if user.field("allowed_token_ids").is_ok() {
 		var $glosses = []
 		for t in tokens {
-			gloss = if flaw == "copy" and $glosses.is_empty() form(t) else "gloss-${form(t)}"
+			gloss = if (flaw == "copy" and $glosses.is_empty()) form(t) else "gloss-${form(t)}"
 			$glosses = $glosses.append(JsonValue.object([("id", t.field("id") ?? JsonValue.null), ("gloss", JsonValue.str(gloss))]))
 		}
 		JsonValue.object([("glosses", JsonValue.list($glosses))])

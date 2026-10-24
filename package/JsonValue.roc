@@ -37,7 +37,7 @@ JsonValue := [
 		Array(items) => "[${Str.join_with(items.map(encode), ",")}]"
 		String(text) => quote(text)
 		Number(text) => text
-		Boolean(b) => if b "true" else "false"
+		Boolean(b) => if (b) "true" else "false"
 		Null => "null"
 	}
 
@@ -89,7 +89,7 @@ JsonValue := [
 		([], []) => Same
 		([], _) => Before
 		(_, []) => After
-		([x, .. as xs], [y, .. as ys]) => if x < y Before else if x > y After else compare_bytes(xs, ys)
+		([x, .. as xs], [y, .. as ys]) => if (x < y) Before else if (x > y) After else compare_bytes(xs, ys)
 	}
 
 	# Constructors and accessors.
@@ -167,7 +167,7 @@ JsonValue := [
 	set : JsonValue, Str, JsonValue -> JsonValue
 	set = |json, name, v| match json {
 		Object(present) => if present.any(|(k, _)| k == name) {
-			Object(present.map(|(k, old)| if k == name (k, v) else (k, old)))
+			Object(present.map(|(k, old)| if (k == name) (k, v) else (k, old)))
 		} else {
 			Object(present.append((name, v)))
 		}
@@ -323,14 +323,30 @@ JsonValue := [
 				}
 				Ok('\\') => {
 					match bytes.get($at + 1) {
-						Ok('"') => { $out = $out.append('"') }
-						Ok('\\') => { $out = $out.append('\\') }
-						Ok('/') => { $out = $out.append('/') }
-						Ok('b') => { $out = $out.append(8) }
-						Ok('f') => { $out = $out.append(12) }
-						Ok('n') => { $out = $out.append('\n') }
-						Ok('r') => { $out = $out.append('\r') }
-						Ok('t') => { $out = $out.append('\t') }
+						Ok('"') => {
+							$out = $out.append('"')
+						}
+						Ok('\\') => {
+							$out = $out.append('\\')
+						}
+						Ok('/') => {
+							$out = $out.append('/')
+						}
+						Ok('b') => {
+							$out = $out.append(8)
+						}
+						Ok('f') => {
+							$out = $out.append(12)
+						}
+						Ok('n') => {
+							$out = $out.append('\n')
+						}
+						Ok('r') => {
+							$out = $out.append('\r')
+						}
+						Ok('t') => {
+							$out = $out.append('\t')
+						}
 						Ok('u') => {
 							first = hex4(bytes, $at + 2)?
 							if first >= 0xD800 and first <= 0xDBFF {

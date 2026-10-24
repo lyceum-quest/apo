@@ -145,10 +145,20 @@ Validate :: [].{
 				$out = $out.append(problem(n, "field-whitespace", "a column begins or ends with whitespace"))
 			}
 		}
-		if r.feats != "_" and !r.feats.split_on("|").all(|f| match f.split_on("=") { [k, v] => k != "" and v != "", _ => Bool.False }) {
+		if r.feats != "_" and !r.feats.split_on("|").all(
+			|f| match f.split_on("=") {
+				[k, v] => k != "" and v != ""
+				_ => Bool.False
+			},
+		) {
 			$out = $out.append(problem(n, "feats", "FEATS must be _ or Name=Value items separated by |"))
 		}
-		if r.deps != "_" and !r.deps.split_on("|").all(|d| match d.split_on(":") { [h, rel, ..] => h != "" and rel != "", _ => Bool.False }) {
+		if r.deps != "_" and !r.deps.split_on("|").all(
+			|d| match d.split_on(":") {
+				[h, rel, ..] => h != "" and rel != ""
+				_ => Bool.False
+			},
+		) {
 			$out = $out.append(problem(n, "deps", "DEPS must be _ or head:relation items separated by |"))
 		}
 		if r.misc != "_" and r.misc.split_on("|").any(|m| m == "") {
@@ -317,14 +327,14 @@ Validate :: [].{
 	}
 
 	lower : Str -> List(U8)
-	lower = |s| s.to_utf8().map(|b| if b >= 'A' and b <= 'Z' b + 32 else b)
+	lower = |s| s.to_utf8().map(|b| if (b >= 'A' and b <= 'Z') b + 32 else b)
 
 	before : List(U8), List(U8) -> Bool
 	before = |a, b| match (a, b) {
 		([], []) => Bool.False
 		([], _) => Bool.True
 		(_, []) => Bool.False
-		([x, .. as xs], [y, .. as ys]) => if x == y before(xs, ys) else x < y
+		([x, .. as xs], [y, .. as ys]) => if (x == y) before(xs, ys) else x < y
 	}
 }
 

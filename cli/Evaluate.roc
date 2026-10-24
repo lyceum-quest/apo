@@ -11,6 +11,7 @@ import apo.Metrics
 import Io
 
 Evaluate :: [].{
+
 	## The folder gold files are cached in: APO_CACHE, else ~/.cache/apo.
 	cache! : () => Str
 	cache! = || match Env.var_str!(Io.os("APO_CACHE")) {
@@ -47,7 +48,7 @@ Evaluate :: [].{
 	}
 
 	## What a run produced, from its directory.
-	Output : { label : Str, dataset : Str, first_line : U64, sentences : List(Conllu.Sentence), links : List(List((U64, U64))), passages : List({ ref : Str, tokens : List(Str) }), units : List({ ref : Str, prose : Str }), token_ids : Str }
+	Output : { label : Str, dataset : Str, first_line : U64, failed_alignments : U64, sentences : List(Conllu.Sentence), links : List(List((U64, U64))), passages : List({ ref : Str, tokens : List(Str) }), units : List({ ref : Str, prose : Str }), token_ids : Str }
 
 	output! : Str => Try(Output, [Failed(Str)])
 	output! = |dir| {
@@ -58,12 +59,17 @@ Evaluate :: [].{
 		jsonl! = |filename| (Io.read!("${dir}/output/${filename}") ?? "").split_on("\n").keep_oks(|l| JsonValue.decode(l))
 		var $links = []
 		for line in jsonl!("alignments.jsonl") {
-			$links = $links.append((line.field("links") ?? JsonValue.list([])).items().map(|p| match p.items() {
-				[a, b] => (a.as_u64() ?? 0, b.as_u64() ?? 0)
-				_ => (0, 0)
-			}))
+			$links = $links.append(
+				(line.field("links") ?? JsonValue.list([])).items().map(
+					|p| match p.items() {
+						[a, b] => (a.as_u64() ?? 0, b.as_u64() ?? 0)
+						_ => (0, 0)
+					},
+				),
+			)
 		}
 		Ok({
+			failed_alignments: jsonl!("alignments.jsonl").keep_if(|l| (l.field("failed") ?? JsonValue.bool(Bool.False)).as_bool() == Ok(Bool.True)).len(),
 			label: (manifest.field("label") ?? JsonValue.str(dir)).as_str() ?? dir,
 			dataset: name,
 			first_line: (dataset.field("first_line") ?? JsonValue.Number("1")).as_u64() ?? 1,
@@ -115,8 +121,9 @@ Evaluate :: [].{
 				$i = $i + 1
 			}
 			a = Metrics.alignment($pairs)
-			alignment_scores = if $pairs.is_empty() [] else [
+			alignment_scores = if ($pairs.is_empty()) [] else [
 				("alignment_sentences", JsonValue.u64($pairs.len())),
+				("alignment_items_failed", JsonValue.u64(run.failed_alignments)),
 				("precision", JsonValue.dec(a.precision)),
 				("recall", JsonValue.dec(a.recall)),
 				("f1", JsonValue.dec(a.f1)),
@@ -125,8 +132,22 @@ Evaluate :: [].{
 				("tokens_partial", JsonValue.u64(a.partial)),
 				("tokens_wrong", JsonValue.u64(a.wrong)),
 			]
-			gloss_scores = if $glossed == 0 [] else [("glosses_scored", JsonValue.u64($glossed)), ("gloss_alignment_agreement", JsonValue.dec(Metrics.ratio($agreeing, $glossed)))]
-			Ok([("sentences_skipped_text_mismatch", JsonValue.u64($mismatched))].concat(alignment_scores).concat(gloss_scores))
+			# The gold's target side is itself a translation: sentence translations are scored against it with chrF.
+			var $segments = []
+			var $s = 0
+			for sentence in run.sentences {
+				g = gold.get(run.first_line - 1 + $s) ?? { source: [], target: [], gold: { sure: [], possible: [] } }
+				match Conllu.comment(sentence, "prose_translation") {
+					Ok(prose) => {
+						$segments = $segments.append((prose, [Str.join_with(g.target, " ")]))
+					}
+					Err(_) => {}
+				}
+				$s = $s + 1
+			}
+			translation_scores = if ($segments.is_empty()) [] else [("translations_scored", JsonValue.u64($segments.len())), ("chrf_vs_gold_translation", JsonValue.dec(Metrics.chrf($segments)))]
+			gloss_scores = if ($glossed == 0) [] else [("glosses_scored", JsonValue.u64($glossed)), ("gloss_alignment_agreement", JsonValue.dec(Metrics.ratio($agreeing, $glossed)))]
+			Ok([("sentences_skipped_text_mismatch", JsonValue.u64($mismatched))].concat(alignment_scores).concat(gloss_scores).concat(translation_scores))
 		}
 		"glosses" => {
 			gold = match manifest.format {
@@ -134,18 +155,20 @@ Evaluate :: [].{
 				_ => Gold.glosses_jsonl(read_file!(files, "glosses")?).map_err(|e| Failed("${manifest.name}: ${e}"))?
 			}
 			rows = run.sentences.map(|s| s.rows.keep_if(Conllu.is_word)).join()
-			id_of = |r| if run.token_ids == "misc-first" (Conllu.misc_items(r).first() ?? "") else ""
+			id_of = |r| if (run.token_ids == "misc-first") (Conllu.misc_items(r).first() ?? "") else ""
 			var $compared = 0
 			var $skipped = 0
 			var $words = 0
 			var $agree = 0
 			var $exact = 0
 			for p in run.passages {
-				words = p.tokens.keep_oks(|t| match rows.keep_if(|r| id_of(r) == t) {
-					[r, ..] => if r.upos == "u" or r.upos == "PUNCT" or Metrics.words(r.form).is_empty() and r.form.to_utf8().len() <= 3 Err(Punctuation) else Ok(r)
-					[] => Err(Missing)
-				})
-				expected = gold.keep_if(|g| g.ref == p.ref).sort_with(|a, b| if a.position < b.position Before else if a.position > b.position After else Same)
+				words = p.tokens.keep_oks(
+					|t| match rows.keep_if(|r| id_of(r) == t) {
+						[r, ..] => if (r.upos == "u" or r.upos == "PUNCT" or Metrics.words(r.form).is_empty() and r.form.to_utf8().len() <= 3) Err(Punctuation) else Ok(r)
+						[] => Err(Missing)
+					},
+				)
+				expected = gold.keep_if(|g| g.ref == p.ref).sort_with(|a, b| if (a.position < b.position) Before else if (a.position > b.position) After else Same)
 				paired = Gold.match_words(words.map(|r| r.form), expected.map(|g| g.form))
 				if paired.is_empty() {
 					$skipped = $skipped + 1
@@ -175,10 +198,12 @@ Evaluate :: [].{
 		}
 		_ => {
 			references = Gold.references_jsonl(read_file!(files, "references")?).map_err(|e| Failed("${manifest.name}: ${e}"))?
-			segments = run.units.keep_oks(|u| match references.keep_if(|r| r.ref == u.ref) {
-				[r, ..] => Ok((u.prose, r.translations))
-				[] => Err(Missing)
-			})
+			segments = run.units.keep_oks(
+				|u| match references.keep_if(|r| r.ref == u.ref) {
+					[r, ..] => Ok((u.prose, r.translations))
+					[] => Err(Missing)
+				},
+			)
 			Ok([("passages_scored", JsonValue.u64(segments.len())), ("chrf", JsonValue.dec(Metrics.chrf(segments)))])
 		}
 	}

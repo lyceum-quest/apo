@@ -1,8 +1,8 @@
 # apo: run language models over CoNLL-U, validate the output, and measure it.
 app [main!] {
-	pf: platform "https://github.com/roc-lang/basic-cli/releases/download/0.26.0/GddgvsGjiNXrHFW6au5i5dUDbTs8FinQdrgE2Gqmw53t.tar.zst",
 	apo: "../package/main.roc",
 	http: "https://github.com/roc-lang/http/releases/download/1.0.0/6ZUwqYhCS8PU9Mo6MF7oV82ET2o7KYb57CLKDq4cq4sS.tar.zst",
+	pf: platform "https://github.com/roc-lang/basic-cli/releases/download/0.26.0/GddgvsGjiNXrHFW6au5i5dUDbTs8FinQdrgE2Gqmw53t.tar.zst",
 }
 
 import pf.OsStr
@@ -139,7 +139,7 @@ validate! = |words| {
 		$total = $total + problems.len()
 	}
 	if $total == 0 {
-		Stderr.line!("${parsed.positional.len().to_str()} file(s) valid${if rules.name == "" "" else " under ${rules.name}"}").map_err(|_| Invalid)
+		Stderr.line!("${parsed.positional.len().to_str()} file(s) valid${if (rules.name == "") "" else " under ${rules.name}"}").map_err(|_| Invalid)
 	} else {
 		_ = Stderr.line!("${$total.to_str()} problem(s)")
 		Err(Invalid)
@@ -155,7 +155,7 @@ runs! = |parsed| {
 		Ok(label) => loaded.runs.keep_if(|r| r.label == label)
 		Err(_) => loaded.runs
 	}
-	if chosen.is_empty() Err(Failed("${path}: no runs (check models and --only)")) else Ok(chosen)
+	if (chosen.is_empty()) Err(Failed("${path}: no runs (check models and --only)")) else Ok(chosen)
 }
 
 plan! = |words| {
@@ -189,7 +189,7 @@ run_experiment! = |words| {
 			$failed = Bool.True
 		}
 	}
-	if $failed Err(Invalid) else Ok({})
+	if ($failed) Err(Invalid) else Ok({})
 }
 
 gold! = |words| {

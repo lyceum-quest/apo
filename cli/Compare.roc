@@ -15,6 +15,7 @@ import Io
 import Load
 
 Compare :: [].{
+
 	## A translation to compare: the same item (passage ref or sentence number) in every run.
 	Item : { id : Str, greek : Str, translations : List((Str, Str)) }
 
@@ -31,10 +32,12 @@ Compare :: [].{
 		var $out = []
 		if passages {
 			for unit in first.units {
-				translations = $runs.keep_oks(|r| match r.units.keep_if(|u| u.ref == unit.ref) {
-					[u, ..] => Ok((r.label, u.prose))
-					[] => Err(Missing)
-				})
+				translations = $runs.keep_oks(
+					|r| match r.units.keep_if(|u| u.ref == unit.ref) {
+						[u, ..] => Ok((r.label, u.prose))
+						[] => Err(Missing)
+					},
+				)
 				if translations.len() == $runs.len() {
 					$out = $out.append({ id: unit.ref, greek: passage_text(first, unit.ref), translations })
 				}
@@ -42,10 +45,12 @@ Compare :: [].{
 		} else {
 			var $i = 0
 			for s in first.sentences {
-				translations = $runs.keep_oks(|r| match r.sentences.get($i) {
-					Ok(other) => Conllu.comment(other, "prose_translation").map_ok(|p| (r.label, p))
-					Err(_) => Err(Missing)
-				})
+				translations = $runs.keep_oks(
+					|r| match r.sentences.get($i) {
+						Ok(other) => Conllu.comment(other, "prose_translation").map_ok(|p| (r.label, p))
+						Err(_) => Err(Missing)
+					},
+				)
 				if translations.len() == $runs.len() {
 					$out = $out.append({ id: ($i + 1).to_str(), greek: Conllu.text(s), translations })
 				}
@@ -65,7 +70,7 @@ Compare :: [].{
 		var $i = 0.U64
 		for s in run.sentences {
 			for r in s.rows.keep_if(Conllu.is_word) {
-				id = if run.token_ids == "misc-first" (Conllu.misc_items(r).first() ?? "") else "${($i + 1).to_str()}:${r.id}"
+				id = if (run.token_ids == "misc-first") (Conllu.misc_items(r).first() ?? "") else "${($i + 1).to_str()}:${r.id}"
 				if tokens.contains(id) {
 					$forms = $forms.append(r.form)
 				}
@@ -187,7 +192,7 @@ Compare :: [].{
 		var $n = 1
 		for p in pairs(found.items) {
 			# Which run is shown first alternates, so position carries no information about the run.
-			(first, second) = if $n % 2 == 0 (p.b, p.a) else (p.a, p.b)
+			(first, second) = if ($n % 2 == 0) (p.b, p.a) else (p.a, p.b)
 			$rows = $rows.append(Str.join_with([$n.to_str(), p.item.id, cell(p.item.greek), cell(first.1), cell(second.1), ""], "\t"))
 			$key = $key.append(JsonValue.object([("row", JsonValue.u64($n)), ("item", JsonValue.str(p.item.id)), ("A", JsonValue.str(first.0)), ("B", JsonValue.str(second.0))]))
 			$n = $n + 1
@@ -227,7 +232,7 @@ Compare :: [].{
 						}
 						match named {
 							Ok(winner) => {
-								$outcomes = $outcomes.append(if winner == "tie" Tie(a, b) else Win(winner, if winner == a b else a))
+								$outcomes = $outcomes.append(if (winner == "tie") Tie(a, b) else Win(winner, if (winner == a) b else a))
 								$per_row = $per_row.set(n - 1, ($per_row.get(n - 1) ?? []).append(winner)) ?? $per_row
 							}
 							Err(_) => {}
@@ -244,26 +249,34 @@ Compare :: [].{
 	report! : Str, List(Str), List(Metrics.Outcome), List(List(Str)), Str, Dec => Try({}, [Failed(Str)])
 	report! = |out, labels, outcomes, per_row, source, spent| {
 		ranking = Metrics.bradley_terry(outcomes)
-		alpha = if per_row.any(|r| r.len() >= 2) Ok(Metrics.krippendorff_alpha(per_row)) else Err(OneRater)
+		alpha = if (per_row.any(|r| r.len() >= 2)) Ok(Metrics.krippendorff_alpha(per_row)) else Err(OneRater)
 		record = |label| {
-			wins = outcomes.keep_if(|o| match o {
-				Win(w, _) => w == label
-				_ => Bool.False
-			}).len()
-			losses = outcomes.keep_if(|o| match o {
-				Win(_, l) => l == label
-				_ => Bool.False
-			}).len()
-			ties = outcomes.keep_if(|o| match o {
-				Tie(a, b) => a == label or b == label
-				_ => Bool.False
-			}).len()
+			wins = outcomes.keep_if(
+				|o| match o {
+					Win(w, _) => w == label
+					_ => Bool.False
+				},
+			).len()
+			losses = outcomes.keep_if(
+				|o| match o {
+					Win(_, l) => l == label
+					_ => Bool.False
+				},
+			).len()
+			ties = outcomes.keep_if(
+				|o| match o {
+					Tie(a, b) => a == label or b == label
+					_ => Bool.False
+				},
+			).len()
 			(wins, losses, ties)
 		}
-		rows = ranking.map(|(label, strength)| {
-			(w, l, t) = record(label)
-			JsonValue.object([("run", JsonValue.str(label)), ("strength", JsonValue.dec(strength)), ("wins", JsonValue.u64(w)), ("losses", JsonValue.u64(l)), ("ties", JsonValue.u64(t))])
-		})
+		rows = ranking.map(
+			|(label, strength)| {
+				(w, l, t) = record(label)
+				JsonValue.object([("run", JsonValue.str(label)), ("strength", JsonValue.dec(strength)), ("wins", JsonValue.u64(w)), ("losses", JsonValue.u64(l)), ("ties", JsonValue.u64(t))])
+			},
+		)
 		agreement = match alpha {
 			Ok(a) => [("krippendorff_alpha", JsonValue.dec(a))]
 			Err(_) => []
@@ -311,10 +324,12 @@ Compare :: [].{
 					k = rows.get((U64.from_str(row) ?? 0) - 1) ?? JsonValue.null
 					run = (k.field("run") ?? JsonValue.str("")).as_str() ?? ""
 					words = (k.field("words") ?? JsonValue.Number("0")).as_u64() ?? 0
-					severities = errors.split_on(";;").keep_oks(|e| match e.split_on("|").map(|f| f.trim()) {
-						[_, _, severity] => Ok(severity)
-						_ => Err(NotAnError)
-					})
+					severities = errors.split_on(";;").keep_oks(
+						|e| match e.split_on("|").map(|f| f.trim()) {
+							[_, _, severity] => Ok(severity)
+							_ => Err(NotAnError)
+						},
+					)
 					$runs = match $runs.find_first_index(|(r, _, _)| r == run) {
 						Ok(i) => $runs.set(i, ((($runs.get(i) ?? (run, [], 0)).0), (($runs.get(i) ?? (run, [], 0)).1).concat(severities), (($runs.get(i) ?? (run, [], 0)).2) + words)) ?? $runs
 						Err(_) => $runs.append((run, severities, words))
