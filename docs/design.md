@@ -59,11 +59,14 @@ model, a provider, or a corpus.
 ```text
 apo validate <file.conllu>... [--profile <profile.json>]   check CoNLL-U; no models, no config needed
 apo plan <experiment.json>                                 print the requests, cache hits, and cost estimate
-apo run <experiment.json> [--paid] [--budget <usd>]        execute; resumes from the run store
+apo run <experiment.json> [--paid] [--only <label>]        execute; resumes from the store
+apo seed <experiment.json> --from <work-dir>               answer a run's calls from an existing work's outputs
+apo gold fetch <gold.json>                                 download a gold set's files and check their SHA-256
 apo eval <run-dir>... --gold <gold.json>                   score runs against a gold set
-apo compare <run-dir> <run-dir>... [--judge <model>]       blinded pairwise judgments and a ranking
-apo export <run-dir> --sheet <kind>                        review sheets (MQM spans, pairwise preferences)
-apo import-review <sheet>                                  load reviewer judgments for compare and eval
+apo compare <run-dir>... --judge <judge.json> --out <dir>  blinded pairwise judgments and a ranking
+apo compare <run-dir>... --export-preferences <sheet.tsv>  review sheets (also --export-mqm; --import-… to read them)
+apo export <run-dir> <work-dir>                            a run as an archive work folder
+apo adopt <work-dir>                                       a pre-apo work folder as a non-replayable run
 ```
 
 ## Configuration
@@ -138,19 +141,30 @@ kept for inspection.
 The run directory is apo's only interface with the outside: consumers import it, `eval` and `compare` read it.
 
 ```text
-runs/<run-id>/
-  manifest.json        apo version, resolved configuration, prompt and input hashes, model, limits, totals
-  config/              snapshot of every configuration file and prompt used
-  (shared by the experiment's runs: ../store/<hash>.json, each request and its reply by the SHA-256 of the request)
-  events.jsonl         one line per call: step, item, attempt, cache hit, tokens, cost, latency, outcome
-  output/
-    <dataset>.conllu   tokens with glosses and sentence translations
-    units.jsonl        passage translations
+<runs>/<experiment>/
+  store/<hash>.json      each accepted request and reply, by the SHA-256 of the request; shared by the runs
+  batch/                 batch results waiting to be checked
+  <label>-<run-id>/
+    manifest.json        apo version, run ID, model, dataset, steps, limits, status, cost; `replayable`
+    config/              snapshot of every configuration file and prompt template used
+    events.jsonl         one line per call: step, item, attempt, cache hit, tokens, cost, latency, outcome
+    rejected/            replies that failed their checks, with the reason
+    output/
+      <dataset>.conllu   tokens with glosses and sentence translations
+      units.jsonl        passage translations
+      passages.jsonl     the passages covered, with their token IDs
+      alignments.jsonl   alignment links per sentence
+    eval/<gold>.json     scores written by apo eval
 ```
 
-- `run-id` is a hash of the resolved configuration, so the same experiment always resumes the same run.
-- A changed prompt or model is a different run, never a mixed one.
+- `run-id` is a hash of everything that determines the outputs (model, rendered prompts, dataset, selected
+  passages), so the same configuration always resumes the same run, and a changed prompt or model is a different
+  run, never a mixed one.
+- The store is shared by an experiment's runs: raising a limit or adding a step makes a new run that calls the model
+  only for requests no run has made.
 - Outputs are rebuilt from the store, so formatting changes never need model calls.
+- `on_failure: "skip"` (for benchmarks) records an item that fails every attempt and continues; the default, `stop`,
+  ends the run there so it can be resumed.
 
 ## Validator
 
@@ -170,9 +184,13 @@ consumer's repository unless the licence allows it.
 |---|---|---|---|
 | Ugarit Ancient Greek–English alignment gold standard (Yousef, Palladino et al.) | gloss layer | precision, recall, F1, alignment error rate; correct / partial / wrong as in Nadel & Crane (2025) | expert annotation, agreement above 80% |
 | Berean Interlinear (New Testament) | gloss layer, at scale | match against accepted alternatives | one translator's choices; glosses Nestle 1904, so Westcott-Hort differences are matched and skipped |
-| Public-domain translations (e.g. Long and Casaubon for Marcus Aurelius, Jowett and Fowler for Plato, the World English Bible) | translations | chrF, COMET with multiple references | alarms for regressions only; they correlate weakly with expert judgment |
-| LSJ senses | glosses | gloss within the lemma's senses | widens accepted alternatives |
-| AGDT, PROIEL, and their UD versions | morphology and syntax | LAS, MLAS, BLEX (CoNLL 2018) | only for steps that produce them, or to measure input annotation |
+| Public-domain translations (e.g. Long and Casaubon for Marcus Aurelius, Jowett and Fowler for Plato, the World English Bible) | translations | chrF with multiple references (COMET later) | alarms for regressions only; they correlate weakly with expert judgment |
+| LSJ senses (later) | glosses | gloss within the lemma's senses | widens accepted alternatives |
+| AGDT, PROIEL, and their UD versions (later) | morphology and syntax | LAS, MLAS, BLEX (CoNLL 2018) | only for steps that produce them, or to measure input annotation |
+
+Words are matched to gold words within a passage by identical form first, then in order when both have the same
+number of words, so editions that differ in word order or wording still compare the words they share. Every score
+reports its coverage (passages and words compared, items failed).
 
 Comparison (`apo compare`) turns subjective judgments into measurements:
 
@@ -189,14 +207,19 @@ Comparison (`apo compare`) turns subjective judgments into measurements:
 
 ```text
 package/          pure Roc library, published as a Roc package
-  Conllu.roc        parse, serialize, validate
-  Profile.roc       profile rules
-  Steps.roc         step kinds: request views, reply schemas, checks, merges
-  Plan.roc          configuration -> plan
-  RunStore.roc      run directory format
-  Metrics.roc       alignment, gloss, and agreement metrics
-cli/              the apo command line: argument parsing and the executor (basic-cli, http)
-examples/         small configurations and fixtures
+  JsonValue.roc     bounded JSON codec; canonical encoding for request hashes
+  Conllu.roc        parse and serialize CoNLL-U; comments and MISC items
+  Validate.roc      format rules and profiles
+  Template.roc      {{variable}} prompt templates
+  Dataset.roc       datasets: token IDs, omitted rows, passages, line ranges
+  Steps.roc         step kinds: request payloads, reply checks, merges
+  Provider.roc      protocols: requests, replies, costs, batches
+  Gold.roc          gold manifests and formats (Ugarit alignments, Berean glosses, JSONL)
+  Metrics.roc       alignment, gloss, chrF, Bradley–Terry, Krippendorff's α, Cohen's κ, MQM
+cli/              the apo command line and its effects (basic-cli 0.26)
+  Load.roc          experiment -> runs; Execute.roc the store and calls; Evaluate.roc, Compare.roc, Archive.roc
+tests/            a deterministic stand-in model and a whole-run fixture
+examples/         gold manifests, validation profiles, experiments
 docs/
 Kaifile.roc       tasks, checks, and the development environment
 ```
@@ -205,13 +228,14 @@ The package has no effects; the CLI performs them. Dependencies are pinned, and 
 
 ## Relationship to Archeion
 
-Archeion is the archive; apo is a tool it uses. Archeion's Kaifile pins an apo release, keeps its work
-configurations and prompts (they are provenance), and imports run directories: their outputs into
-`conllu/generated/`, their manifests next to them. Release, sync, and deploy stay in Archeion unchanged. Gold-set
-manifests and published evaluation results live in `archeion/benchmarks/`.
+Archeion is the archive; apo is a tool it uses. Archeion keeps its prompts and one experiment per work in `apo/`
+(they are provenance), and `apo export` writes finished runs into `conllu/generated/`. Release, sync, and deploy
+stay in Archeion unchanged. Until apo publishes releases, Archeion runs it from a sibling checkout.
 
-Archeion's existing works predate apo and kept no request and reply store, so they are imported as runs without a
-store: manifest and outputs only, marked as not replayable.
+Archeion's existing works predate apo and kept no request and reply store. `apo seed` answers each call a run would
+make from such a work's outputs (checked like any reply), so a work continues without regeneration; seeding
+Archeion's Luke reproduces its 62 sentences and 80 passages exactly, and its prompts render byte-identical to
+`loop.roc`'s. `apo adopt` instead wraps a work as a non-replayable run, for scoring it next to new runs.
 
 ## Milestones
 
@@ -224,10 +248,13 @@ store: manifest and outputs only, marked as not replayable.
 5. **Comparison.** Pairwise judging, Bradley–Terry ranking, review sheets, agreement.
 6. **Cost.** `anthropic-messages` with prompt caching and batches; budget enforcement across providers.
 
+All six are implemented. Not yet exercised against live services: `anthropic-messages` calls and batches (tested on
+request building and reply parsing only).
+
 ## Open questions
 
-- Ugarit gold standard: which texts it covers, its licence, and its exact format.
-- Berean Interlinear: whether the April 2023 public-domain dedication covers the interlinear's glosses.
-- AGDT licence.
-- Matching Westcott-Hort (OGA) tokens to Nestle 1904 (Berean) tokens in the New Testament.
-- Whether `apo compare` judge prompts are configuration like step prompts (likely yes) and which defaults ship.
+- Berean Interlinear: the April 2023 public-domain dedication names "the Berean Bible and Majority Bible texts" and
+  not the interlinear's glosses explicitly; the manifest says so.
+- Ugarit's licence is CC BY-SA 4.0 in its repository but CC BY 4.0 on Zenodo; the manifest pins the repository.
+- AGDT is CC BY-SA 3.0 US in its repository, but UD_Ancient_Greek-Perseus is CC BY-NC-SA 2.5.
+- Which judge prompts and gold sets ship as defaults once apo is released.
