@@ -185,7 +185,7 @@ Dataset :: [].{
 			}
 			$i = $i + 1
 		}
-		if last == "" 0 else sentences.len()
+		if (last == "") 0 else sentences.len()
 	}
 }
 

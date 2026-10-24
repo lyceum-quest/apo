@@ -1,0 +1,1 @@
+These sentences come from Plato's Crito: an Attic Greek dialogue between Socrates and his friend Crito in Socrates' prison cell on the morning Crito urges him to escape. The text is tokenized: words and punctuation are separate tokens, and there are no lemmas, parts of speech, or syntax; gloss each token from its form and context.

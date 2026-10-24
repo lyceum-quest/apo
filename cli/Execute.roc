@@ -21,6 +21,7 @@ import Io
 import Load
 
 Execute :: [].{
+
 	## Live calls models; Dry only counts calls; Seed answers calls from an archive work folder's outputs.
 	Mode : [Live({ paid : Bool }), Dry, Seed(Str)]
 
@@ -36,13 +37,16 @@ Execute :: [].{
 			("apo", JsonValue.str(version)),
 			("model", Provider.identity(run.model, { system: "", user: "", max_tokens: 0 })),
 			("steps", JsonValue.list(run.steps.map(|s| JsonValue.object([("kind", JsonValue.str(Steps.name(s.kind))), ("system", JsonValue.str(s.system)), ("max_tokens", JsonValue.u64(s.max_tokens)), ("lang", JsonValue.str(s.lang)), ("punctuation", JsonValue.strs(s.punctuation))])))),
-			("dataset", JsonValue.object([
-				("name", JsonValue.str(run.dataset.name)),
-				("input", JsonValue.str(Io.sha256!(Conllu.serialize(run.sentences))?)),
-				("passages", JsonValue.list(selected.map(|p| Steps.unit(p, { prose: "", literal: "" })))),
-				("omitted", JsonValue.str(run.dataset.omitted_prefix)),
-				("reference", JsonValue.list(run.reference.map(JsonValue.strs))),
-			])),
+			(
+				"dataset",
+				JsonValue.object([
+					("name", JsonValue.str(run.dataset.name)),
+					("input", JsonValue.str(Io.sha256!(Conllu.serialize(run.sentences))?)),
+					("passages", JsonValue.list(selected.map(|p| Steps.unit(p, { prose: "", literal: "" })))),
+					("omitted", JsonValue.str(run.dataset.omitted_prefix)),
+					("reference", JsonValue.list(run.reference.map(JsonValue.strs))),
+				]),
+			),
 		])
 		id = Io.sha256!(JsonValue.canonical(identity))?
 		Ok({ id, dir: "${run.runs_dir}/${run.experiment}/${run.label}-${Str.from_utf8(id.to_utf8().take_first(10)) ?? id}", identity })
@@ -101,7 +105,7 @@ Execute :: [].{
 			while $i < items and $status == "completed" {
 				sentence = $sentences.get($i) ?? { line: 0, comments: [], rows: [] }
 				label = "${kind} ${($i + 1).to_str()}/${items.to_str()}"
-				_ = if mode != Dry and terminal Stderr.write!("\r\u(1b)[2K${run.label}: ${label} · $${money($spent)}") else Ok({})
+				_ = if (mode != Dry and terminal) Stderr.write!("\r\u(1b)[2K${run.label}: ${label} · $${money($spent)}") else Ok({})
 				call = request(run, step, $sentences, selected, $i)
 				seeded = match mode {
 					Seed(_) => seed!(ctx, step.kind, request(run, step, $sentences, selected, $i), work, $i, selected.get($i) ?? { ref: "", label: "", tokens: [] })
@@ -110,17 +114,17 @@ Execute :: [].{
 				result = match seeded {
 					Err(message) => Err(Stopped({ message, cost: 0 }))
 					Ok(_) => match step.kind {
-					TranslateSentence => call!(ctx, $spent, kind, $i, call, |content| Steps.check_translation(Steps.reply_object(content)?)).map_ok(|r| { cost: r.cost, cached: r.cached, apply: TranslatedSentence(r.value) })
-					GlossTokens => call!(ctx, $spent, kind, $i, call, |content| Steps.check_glosses(run.dataset, sentence, step.punctuation, Steps.reply_object(content)?)).map_ok(|r| { cost: r.cost, cached: r.cached, apply: Glossed(r.value) })
-					TranslatePassage => call!(ctx, $spent, kind, $i, call, |content| Steps.check_translation(Steps.reply_object(content)?)).map_ok(|r| { cost: r.cost, cached: r.cached, apply: TranslatedPassage(r.value) })
-					Align => call!(ctx, $spent, kind, $i, call, |content| Steps.check_links(Steps.reply_object(content)?, overt(run.dataset, sentence).len(), (run.reference.get($i) ?? []).len())).map_ok(|r| { cost: r.cost, cached: r.cached, apply: Aligned(r.value) })
-				}
+						TranslateSentence => call!(ctx, $spent, kind, $i, call, |content| Steps.check_translation(Steps.reply_object(content)?)).map_ok(|r| { cost: r.cost, cached: r.cached, apply: TranslatedSentence(r.value) })
+						GlossTokens => call!(ctx, $spent, kind, $i, call, |content| Steps.check_glosses(run.dataset, sentence, step.punctuation, Steps.reply_object(content)?)).map_ok(|r| { cost: r.cost, cached: r.cached, apply: Glossed(r.value) })
+						TranslatePassage => call!(ctx, $spent, kind, $i, call, |content| Steps.check_translation(Steps.reply_object(content)?)).map_ok(|r| { cost: r.cost, cached: r.cached, apply: TranslatedPassage(r.value) })
+						Align => call!(ctx, $spent, kind, $i, call, |content| Steps.check_links(Steps.reply_object(content)?, overt(run.dataset, sentence).len(), (run.reference.get($i) ?? []).len())).map_ok(|r| { cost: r.cost, cached: r.cached, apply: Aligned(r.value) })
+					}
 				}
 				$report = { ..$report, items: $report.items + 1 }
 				match result {
 					Ok(done) => {
 						$spent = $spent + done.cost
-						$report = if done.cached { ..$report, cached: $report.cached + 1 } else { ..$report, called: $report.called + 1 }
+						$report = if (done.cached) { ..$report, cached: $report.cached + 1 } else { ..$report, called: $report.called + 1 }
 						match done.apply {
 							TranslatedSentence(t) => {
 								$sentences = $sentences.set($i, Steps.merge_translation(sentence, $i, step.lang, t)) ?? $sentences
@@ -164,7 +168,7 @@ Execute :: [].{
 			}
 		}
 		if mode != Dry {
-			_ = if terminal Stderr.write!("\r\u(1b)[2K") else Ok({})
+			_ = if (terminal) Stderr.write!("\r\u(1b)[2K") else Ok({})
 			Io.write!("${dir}/manifest.json", JsonValue.pretty(manifest(run, version, located.id, started, $status, $spent)))?
 		}
 		Ok({ label: run.label, dir, status: $status, steps: $reports, cost: $spent })
@@ -191,7 +195,7 @@ Execute :: [].{
 			return Ok({})
 		}
 		source = ctx.run.sentences.get(i) ?? { line: 0, comments: [], rows: [] }
-		from_work = if kind == TranslatePassage source else work.sentences.get(i) ?? return Err("the work has no sentence ${(i + 1).to_str()}")
+		from_work = if (kind == TranslatePassage) source else work.sentences.get(i) ?? return Err("the work has no sentence ${(i + 1).to_str()}")
 		if from_work.rows.map(|r| r.form) != source.rows.map(|r| r.form) {
 			return Err("sentence ${(i + 1).to_str()} of the work differs from the dataset")
 		}
@@ -302,10 +306,25 @@ Execute :: [].{
 		("experiment", JsonValue.str(run.experiment)),
 		("label", JsonValue.str(run.label)),
 		("model", JsonValue.object([("name", JsonValue.str(run.model.name)), ("provider", JsonValue.str(run.model.provider.name)), ("protocol", JsonValue.str(Provider.protocol_name(run.model.provider.protocol))), ("id", JsonValue.str(run.model.id)), ("options", run.model.options)])),
-		("dataset", JsonValue.object([("name", JsonValue.str(run.dataset.name)), ("title", JsonValue.str(run.dataset.title)), ("input", JsonValue.str(run.dataset.input)), ("passages", JsonValue.u64(Dataset.selected(run.dataset, run.passages).len())), ("token_ids", JsonValue.str(if run.dataset.token_ids == Position "position" else "misc-first")), ("first_line", JsonValue.u64(match run.dataset.lines {
-			AllLines => 1
-			Lines(first, _) => first
-		}))])),
+		(
+			"dataset",
+			JsonValue.object([
+				("name", JsonValue.str(run.dataset.name)),
+				("title", JsonValue.str(run.dataset.title)),
+				("input", JsonValue.str(run.dataset.input)),
+				("passages", JsonValue.u64(Dataset.selected(run.dataset, run.passages).len())),
+				("token_ids", JsonValue.str(if (run.dataset.token_ids == Position) "position" else "misc-first")),
+				(
+					"first_line",
+					JsonValue.u64(
+						match run.dataset.lines {
+							AllLines => 1
+							Lines(first, _) => first
+						},
+					),
+				),
+			]),
+		),
 		("steps", JsonValue.list(run.steps.map(|s| JsonValue.object([("kind", JsonValue.str(Steps.name(s.kind))), ("prompt", JsonValue.str(s.prompt_file)), ("max_tokens", JsonValue.u64(s.max_tokens))])))),
 		("limits", JsonValue.object([("attempts", JsonValue.u64(run.attempts)), ("timeout_seconds", JsonValue.u64(run.timeout_seconds)), ("budget_usd", JsonValue.dec(run.budget))])),
 		("started", JsonValue.str(started)),
@@ -433,27 +452,31 @@ Execute :: [].{
 	event! = |dir, kind, item, attempt, cached, tokens, cost, latency, outcome, message|
 		Io.append!(
 			"${dir}/events.jsonl",
-			"${JsonValue.encode(JsonValue.object([
-				("at", JsonValue.str(Io.now!())),
-				("step", JsonValue.str(kind)),
-				("item", JsonValue.u64(item)),
-				("attempt", JsonValue.u64(attempt)),
-				("cached", JsonValue.bool(cached)),
-				("input_tokens", JsonValue.u64(tokens.input)),
-				("output_tokens", JsonValue.u64(tokens.output)),
-				("cache_read_tokens", JsonValue.u64(tokens.cache_read)),
-				("cost", JsonValue.dec(cost)),
-				("latency_ms", JsonValue.u64(latency)),
-				("outcome", JsonValue.str(outcome)),
-				("message", JsonValue.str(message)),
-			]))}\n",
+			"${
+				JsonValue.encode(
+					JsonValue.object([
+						("at", JsonValue.str(Io.now!())),
+						("step", JsonValue.str(kind)),
+						("item", JsonValue.u64(item)),
+						("attempt", JsonValue.u64(attempt)),
+						("cached", JsonValue.bool(cached)),
+						("input_tokens", JsonValue.u64(tokens.input)),
+						("output_tokens", JsonValue.u64(tokens.output)),
+						("cache_read_tokens", JsonValue.u64(tokens.cache_read)),
+						("cost", JsonValue.dec(cost)),
+						("latency_ms", JsonValue.u64(latency)),
+						("outcome", JsonValue.str(outcome)),
+						("message", JsonValue.str(message)),
+					]),
+				)
+			}\n",
 		)
 
 	## The response body of a call, or why there is none.
 	send! : Provider.Outbound, U64 => Try(Str, Str)
 	send! = |outbound, timeout_seconds| match outbound {
 		Http(h) => {
-			var $request = Request.from_method(if h.method == Get GET else POST).with_uri(h.url).with_body(h.body.to_utf8()).with_timeout(TimeoutMilliseconds(timeout_seconds * 1000))
+			var $request = Request.from_method(if (h.method == Get) GET else POST).with_uri(h.url).with_body(h.body.to_utf8()).with_timeout(TimeoutMilliseconds(timeout_seconds * 1000))
 			for (name, value) in h.headers {
 				$request = $request.add_header(name, value)
 			}
@@ -472,7 +495,7 @@ Execute :: [].{
 		Exec(e) => match e.argv {
 			[program, .. as args] => {
 				base = Cmd.new(Io.os(program)).args(args.map(Io.os)).envs(e.env.map(|(k, v)| (Io.os(k), Io.os(v)))).stdin(Bytes(e.stdin.to_utf8())).timeout(Duration.seconds(timeout_seconds))
-				command = if e.cwd == "" base else base.cwd(Path.unix(e.cwd))
+				command = if (e.cwd == "") base else base.cwd(Path.unix(e.cwd))
 				match command.run!() {
 					Ok(output) => match output.status {
 						Exited(0) => Ok(Str.from_utf8(output.stdout_bytes) ?? "")

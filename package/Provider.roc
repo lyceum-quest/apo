@@ -114,7 +114,7 @@ Provider :: [].{
 				]),
 				m.options,
 			)
-			auth = if key == "" [] else [("Authorization", "Bearer ${key}")]
+			auth = if (key == "") [] else [("Authorization", "Bearer ${key}")]
 			Http({ method: Post, url: "${m.provider.base_url}/chat/completions", headers: auth.concat(m.provider.headers).append(("Content-Type", "application/json")), body: JsonValue.encode(body) })
 		}
 		AnthropicMessages => {
@@ -142,10 +142,12 @@ Provider :: [].{
 	## The Message Batches API (half price): one request carrying many calls, each under a custom ID.
 	batch_submit : Model, List((Str, Call)), Str -> Outbound
 	batch_submit = |m, calls, key| {
-		requests = calls.map(|(id, c)| match outbound(m, c, key) {
-			Http(h) => JsonValue.object([("custom_id", JsonValue.str(id)), ("params", JsonValue.decode(h.body) ?? JsonValue.null)])
-			Exec(_) => JsonValue.null
-		})
+		requests = calls.map(
+			|(id, c)| match outbound(m, c, key) {
+				Http(h) => JsonValue.object([("custom_id", JsonValue.str(id)), ("params", JsonValue.decode(h.body) ?? JsonValue.null)])
+				Exec(_) => JsonValue.null
+			},
+		)
 		Http({ method: Post, url: "${m.provider.base_url}/v1/messages/batches", headers: anthropic_headers(m, key), body: JsonValue.encode(JsonValue.object([("requests", JsonValue.list(requests))])) })
 	}
 
@@ -171,14 +173,16 @@ Provider :: [].{
 
 	## A batch's results (JSONL): each custom ID with its message as a Messages reply body, or why it has none.
 	batch_results : Str -> List((Str, Try(Str, Str)))
-	batch_results = |jsonl| jsonl.split_on("\n").keep_oks(|line| JsonValue.decode(line)).map(|r| {
-		id = (r.field("custom_id") ?? JsonValue.str("")).as_str() ?? ""
-		result = r.field("result") ?? JsonValue.object([])
-		match (result.field("type") ?? JsonValue.str("")).as_str() ?? "" {
-			"succeeded" => (id, Ok(JsonValue.encode(result.field("message") ?? JsonValue.null)))
-			other => (id, Err("batch result ${other}: ${JsonValue.encode(result.field("error") ?? JsonValue.null)}"))
-		}
-	})
+	batch_results = |jsonl| jsonl.split_on("\n").keep_oks(|line| JsonValue.decode(line)).map(
+		|r| {
+			id = (r.field("custom_id") ?? JsonValue.str("")).as_str() ?? ""
+			result = r.field("result") ?? JsonValue.object([])
+			match (result.field("type") ?? JsonValue.str("")).as_str() ?? "" {
+				"succeeded" => (id, Ok(JsonValue.encode(result.field("message") ?? JsonValue.null)))
+				other => (id, Err("batch result ${other}: ${JsonValue.encode(result.field("error") ?? JsonValue.null)}"))
+			}
+		},
+	)
 
 	message : Str, Str -> JsonValue
 	message = |role, content| JsonValue.object([("role", JsonValue.str(role)), ("content", JsonValue.str(content))])

@@ -40,10 +40,12 @@ Load :: [].{
 		providers_path = Io.join(dir, text("providers", "providers.json"))
 		configured = Provider.settings(Io.json!(providers_path)?).map_err(|m| Failed("${providers_path}: ${m}"))?
 		# A command named by a relative path is relative to providers.json, like every other path.
-		providers = configured.map(|p| match p.protocol {
-			Command([program, .. as rest]) if program.contains("/") => { ..p, protocol: Command(rest.prepend(Io.join(Io.dir_of(providers_path), program))) }
-			_ => p
-		})
+		providers = configured.map(
+			|p| match p.protocol {
+				Command([program, .. as rest]) if program.contains("/") => { ..p, protocol: Command(rest.prepend(Io.join(Io.dir_of(providers_path), program))) }
+				_ => p
+			},
+		)
 		dataset_path = Io.join(dir, text("dataset", "dataset.json"))
 		dataset = dataset!(dataset_path)?
 		pipeline_path = Io.join(dir, text("pipeline", "pipeline.json"))
@@ -80,7 +82,7 @@ Load :: [].{
 					file = option.as_str() ?? ""
 					content = Io.read!(Io.join(dir, file))?
 					$sources = $sources.append(("variants/${key}/${Io.stem(file)}.md", content))
-					label = if v.label == "" Io.stem(file) else "${v.label}-${Io.stem(file)}"
+					label = if (v.label == "") Io.stem(file) else "${v.label}-${Io.stem(file)}"
 					$next = $next.append({ label, values: v.values.append((key, content.trim())) })
 				}
 			}
@@ -105,7 +107,7 @@ Load :: [].{
 				if $steps.is_empty() {
 					return Err(Failed("${pipeline_path}: no steps"))
 				}
-				label = if variant.label == "" model.name else "${model.name}-${variant.label}"
+				label = if (variant.label == "") model.name else "${model.name}-${variant.label}"
 				$runs = $runs.append({ experiment: name, label, model, steps: $steps, dataset: dataset.spec, sentences: dataset.sentences, passages: dataset.passages, reference: dataset.reference, attempts, timeout_seconds, skip_failures, budget, runs_dir, sources: $sources })
 			}
 		}
@@ -143,13 +145,15 @@ Load :: [].{
 			}
 			Err(_) => Err(NoGold)
 		}
-		raw = Dataset.spec(match from_gold {
-			Ok(g) => json.set("input", JsonValue.str(g.input))
-			Err(_) => json
-		}).map_err(|m| Failed("${path}: ${m}"))?
+		raw = Dataset.spec(
+			match from_gold {
+				Ok(g) => json.set("input", JsonValue.str(g.input))
+				Err(_) => json
+			},
+		).map_err(|m| Failed("${path}: ${m}"))?
 		spec = match from_gold {
 			Ok(g) => { ..raw, input: g.input, reference: g.reference }
-			Err(_) => { ..raw, input: Io.join(dir, raw.input), reference: if raw.reference == "" "" else Io.join(dir, raw.reference) }
+			Err(_) => { ..raw, input: Io.join(dir, raw.input), reference: if (raw.reference == "") "" else Io.join(dir, raw.reference) }
 		}
 		input = Io.read!(spec.input)?
 		sentences = match spec.format {
@@ -161,7 +165,7 @@ Load :: [].{
 			Refs(file) => Dataset.from_refs(spec, Io.read!(Io.join(dir, file))?, sentences).map_err(|m| Failed("${file}: ${m}"))?
 			File(file) => Dataset.from_file(Io.json!(Io.join(dir, file))?).map_err(|m| Failed("${file}: ${m}"))?
 		}
-		reference = if spec.reference == "" [] else Dataset.from_tokens(Dataset.slice(spec, Io.read!(spec.reference)?)).map(|s| s.rows.map(|r| r.form))
+		reference = if (spec.reference == "") [] else Dataset.from_tokens(Dataset.slice(spec, Io.read!(spec.reference)?)).map(|s| s.rows.map(|r| r.form))
 		Ok({ spec, sentences, passages, reference })
 	}
 }

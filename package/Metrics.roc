@@ -44,8 +44,8 @@ Metrics :: [].{
 		{
 			precision,
 			recall,
-			f1: if precision + recall == 0 0 else 2 * precision * recall / (precision + recall),
-			aer: if $a + $s == 0 0 else 1 - ($as + $ap).to_dec() / ($a + $s).to_dec(),
+			f1: if (precision + recall == 0) 0 else 2 * precision * recall / (precision + recall),
+			aer: if ($a + $s == 0) 0 else 1 - ($as + $ap).to_dec() / ($a + $s).to_dec(),
 			predicted: $a,
 			sure: $s,
 			possible: $p,
@@ -73,7 +73,7 @@ Metrics :: [].{
 	targets_of = |links, source| links.keep_if(|(s, _)| s == source).map(|(_, t)| t)
 
 	ratio : U64, U64 -> Dec
-	ratio = |n, d| if d == 0 0 else n.to_dec() / d.to_dec()
+	ratio = |n, d| if (d == 0) 0 else n.to_dec() / d.to_dec()
 
 	## Lowercase words without punctuation or bracketed insertions: `[the] Of-God,` reads as ["the", "of", "god"].
 	words : Str -> List(Str)
@@ -87,7 +87,7 @@ Metrics :: [].{
 					$word = []
 				}
 			} else {
-				$word = $word.append(if b >= 'A' and b <= 'Z' b + 32 else b)
+				$word = $word.append(if (b >= 'A' and b <= 'Z') b + 32 else b)
 			}
 		}
 		$out
@@ -104,11 +104,13 @@ Metrics :: [].{
 
 	## A gloss agrees with a gold rendering when they share a content word, or are both only function words and equal.
 	gloss_agrees : Str, List(Str) -> Bool
-	gloss_agrees = |gloss, accepted| accepted.any(|a| {
-		mine = content(gloss)
-		theirs = content(a)
-		if mine.is_empty() or theirs.is_empty() words(gloss) == words(a) else mine.any(|w| theirs.contains(w))
-	})
+	gloss_agrees = |gloss, accepted| accepted.any(
+		|a| {
+			mine = content(gloss)
+			theirs = content(a)
+			if (mine.is_empty() or theirs.is_empty()) words(gloss) == words(a) else mine.any(|w| theirs.contains(w))
+		},
+	)
 
 	## Exact agreement after normalization (case, brackets, punctuation), against any accepted gloss.
 	gloss_exact : Str, List(Str) -> Bool
@@ -150,7 +152,7 @@ Metrics :: [].{
 		}
 		precision = valid.map(|(m, hc, _)| ratio(m, hc)).sum() / valid.len().to_dec()
 		recall = valid.map(|(m, _, rc)| ratio(m, rc)).sum() / valid.len().to_dec()
-		if precision + recall == 0 0 else 100 * 5 * precision * recall / (4 * precision + recall)
+		if (precision + recall == 0) 0 else 100 * 5 * precision * recall / (4 * precision + recall)
 	}
 
 	## Code points without whitespace, as strings.
@@ -163,25 +165,27 @@ Metrics :: [].{
 				if !$current.is_empty() {
 					$out = $out.append(Str.from_utf8($current) ?? "")
 				}
-				$current = if b == ' ' or b == '\n' or b == '\t' [] else [b]
+				$current = if (b == ' ' or b == '\n' or b == '\t') [] else [b]
 			} else {
 				$current = $current.append(b)
 			}
 		}
-		if $current.is_empty() $out else $out.append(Str.from_utf8($current) ?? "")
+		if ($current.is_empty()) $out else $out.append(Str.from_utf8($current) ?? "")
 	}
 
 	## For n = 1..6: (matched, hypothesis, reference) n-gram counts, matches clipped by reference counts.
 	ngram_stats : List(Str), List(Str) -> List((U64, U64, U64))
-	ngram_stats = |h, r| [1, 2, 3, 4, 5, 6].map(|n| {
-		hg = counts(grams(h, n))
-		rg = counts(grams(r, n))
-		matched = hg.map(|(g, c)| smaller(c, rg.keep_if(|(x, _)| x == g).map(|(_, k)| k).first() ?? 0)).sum()
-		(matched, hg.map(|(_, c)| c).sum(), rg.map(|(_, c)| c).sum())
-	})
+	ngram_stats = |h, r| [1, 2, 3, 4, 5, 6].map(
+		|n| {
+			hg = counts(grams(h, n))
+			rg = counts(grams(r, n))
+			matched = hg.map(|(g, c)| smaller(c, rg.keep_if(|(x, _)| x == g).map(|(_, k)| k).first() ?? 0)).sum()
+			(matched, hg.map(|(_, c)| c).sum(), rg.map(|(_, c)| c).sum())
+		},
+	)
 
 	smaller : U64, U64 -> U64
-	smaller = |a, b| if a < b a else b
+	smaller = |a, b| if (a < b) a else b
 
 	grams : List(Str), U64 -> List(Str)
 	grams = |cs, n| {
@@ -220,28 +224,34 @@ Metrics :: [].{
 				}
 			}
 		}
-		wins = |s| outcomes.map(|o| match o {
-			Win(a, _) if a == s => 1.0
-			Tie(a, b) if a == s or b == s => 0.5
-			_ => 0.0
-		}).sum()
-		games = |s, t| outcomes.keep_if(|o| match o {
-			Win(a, b) => (a == s and b == t) or (a == t and b == s)
-			Tie(a, b) => (a == s and b == t) or (a == t and b == s)
-		}).len().to_dec()
+		wins = |s| outcomes.map(
+			|o| match o {
+				Win(a, _) if a == s => 1.0
+				Tie(a, b) if a == s or b == s => 0.5
+				_ => 0.0
+			},
+		).sum()
+		games = |s, t| outcomes.keep_if(
+			|o| match o {
+				Win(a, b) => (a == s and b == t) or (a == t and b == s)
+				Tie(a, b) => (a == s and b == t) or (a == t and b == s)
+			},
+		).len().to_dec()
 		count = $systems.len().to_dec()
 		var $strength = $systems.map(|s| (s, 1.0))
 		var $round = 0
 		while $round < 200 {
-			next = $strength.map(|(s, ps)| {
-				denominator = $strength.keep_if(|(t, _)| t != s).map(|(t, pt)| if games(s, t) == 0 0 else games(s, t) / (ps + pt)).sum()
-				(s, if denominator == 0 ps else (if wins(s) < 0.01 0.01 else wins(s)) / denominator)
-			})
+			next = $strength.map(
+				|(s, ps)| {
+					denominator = $strength.keep_if(|(t, _)| t != s).map(|(t, pt)| if (games(s, t) == 0) 0 else games(s, t) / (ps + pt)).sum()
+					(s, if (denominator == 0) ps else (if (wins(s) < 0.01) 0.01 else wins(s)) / denominator)
+				},
+			)
 			total = next.map(|(_, p)| p).sum()
 			$strength = next.map(|(s, p)| (s, p * count / total))
 			$round = $round + 1
 		}
-		$strength.sort_with(|(_, a), (_, b)| if a > b Before else if a < b After else Same)
+		$strength.sort_with(|(_, a), (_, b)| if (a > b) Before else if (a < b) After else Same)
 	}
 
 	## Krippendorff's alpha for nominal labels: `units` are the labels raters gave each item (any number of raters,
@@ -263,7 +273,7 @@ Metrics :: [].{
 		}
 		labels = counts($totals)
 		expected = labels.map(|(a, na)| labels.keep_if(|(b, _)| b != a).map(|(_, nb)| na.to_dec() * nb.to_dec()).sum()).sum()
-		if expected == 0 1 else 1 - (n - 1) * $observed / expected
+		if (expected == 0) 1 else 1 - (n - 1) * $observed / expected
 	}
 
 	## Cohen's kappa for two raters' labels of the same items.
@@ -277,7 +287,7 @@ Metrics :: [].{
 		first = counts(pairs.map(|(a, _)| a))
 		second = counts(pairs.map(|(_, b)| b))
 		chance = first.map(|(l, c)| c.to_dec() / n * ((second.keep_if(|(x, _)| x == l).map(|(_, k)| k).first() ?? 0).to_dec() / n)).sum()
-		if chance == 1 1 else (agree - chance) / (1 - chance)
+		if (chance == 1) 1 else (agree - chance) / (1 - chance)
 	}
 
 	## MQM penalty per 100 source words: minor 1, major 5, critical 10 (MQM-DQF weights).
@@ -289,7 +299,7 @@ Metrics :: [].{
 			"critical" => 10
 			_ => 0
 		}
-		if source_words == 0 0 else severities.map(weight).sum() * 100 / source_words.to_dec()
+		if (source_words == 0) 0 else severities.map(weight).sum() * 100 / source_words.to_dec()
 	}
 }
 

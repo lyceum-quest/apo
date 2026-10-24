@@ -25,7 +25,7 @@ Io :: [].{
 	exists! = |path| Path.exists!(Path.unix(path)) ?? Bool.False
 
 	mkdir! : Str => Try({}, [Failed(Str)])
-	mkdir! = |path| if path == "" or path == "." Ok({}) else Path.create_all!(Path.unix(path)).map_err(|_| Failed("cannot create ${path}"))
+	mkdir! = |path| if (path == "" or path == ".") Ok({}) else Path.create_all!(Path.unix(path)).map_err(|_| Failed("cannot create ${path}"))
 
 	json! : Str => Try(JsonValue, [Failed(Str)])
 	json! = |path| JsonValue.decode(read!(path)?).map_err(|message| Failed("${path}: ${message}"))
@@ -38,7 +38,7 @@ Io :: [].{
 	sha256! = |text| {
 		output = Cmd.new("sha256sum").stdin(Bytes(text.to_utf8())).run!().map_err(|_| Failed("cannot run sha256sum"))?
 		hex = Str.from_utf8(output.stdout_bytes.take_first(64)) ?? ""
-		if hex.to_utf8().len() == 64 Ok(hex) else Err(Failed("sha256sum gave no digest"))
+		if (hex.to_utf8().len() == 64) Ok(hex) else Err(Failed("sha256sum gave no digest"))
 	}
 
 	now! : () => Str
@@ -50,13 +50,13 @@ Io :: [].{
 	## The folder part of a path, or "." for a bare name.
 	dir_of : Str -> Str
 	dir_of = |path| match path.split_last("/") {
-		Ok({ before, after: _ }) => if before == "" "/" else before
+		Ok({ before, after: _ }) => if (before == "") "/" else before
 		Err(_) => "."
 	}
 
 	## `relative` resolved against `dir`, unless it is absolute.
 	join : Str, Str -> Str
-	join = |dir, relative| if relative.starts_with("/") or dir == "." relative else "${dir}/${relative}"
+	join = |dir, relative| if (relative.starts_with("/") or dir == ".") relative else "${dir}/${relative}"
 
 	## The file name without folders or extension.
 	stem : Str -> Str
@@ -73,7 +73,7 @@ Io :: [].{
 
 	## The API key a model's provider names, or "" when it names none or the variable is unset.
 	key! : Provider.Model => Str
-	key! = |model| if model.provider.key_env == "" "" else Env.var_str!(OsStr.from_str(model.provider.key_env)) ?? ""
+	key! = |model| if (model.provider.key_env == "") "" else Env.var_str!(OsStr.from_str(model.provider.key_env)) ?? ""
 
 	is_terminal! : U64 => Bool
 	is_terminal! = |fd| match Cmd.new("test").args(["-t", OsStr.from_str(fd.to_str())]).run!() {

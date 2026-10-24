@@ -64,7 +64,7 @@ Gold :: [].{
 		var $sure = []
 		var $possible = []
 		for item in tokens(line) {
-			kind = if item.ends_with("S") Sure else if item.ends_with("P") Possible else return Err("link ${item} lacks S or P")
+			kind = if (item.ends_with("S")) Sure else if (item.ends_with("P")) Possible else return Err("link ${item} lacks S or P")
 			match item.drop_suffix("S").drop_suffix("P").split_on("-") {
 				[a, b] => {
 					pair = (U64.from_str(a) ?? return Err("bad link ${item}"), U64.from_str(b) ?? return Err("bad link ${item}"))
@@ -168,7 +168,7 @@ Gold :: [].{
 			}
 			$l = $l + 1
 		}
-		$pairs.concat(List.map2($rest_mine, $rest_theirs, |a, b| (a, b))).sort_with(|(a, _), (b, _)| if a < b Before else if a > b After else Same)
+		$pairs.concat(List.map2($rest_mine, $rest_theirs, |a, b| (a, b))).sort_with(|(a, _), (b, _)| if (a < b) Before else if (a > b) After else Same)
 	}
 
 	Reference : { ref : Str, translations : List(Str) }

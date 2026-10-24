@@ -63,7 +63,7 @@ Conllu :: [].{
 			}
 			$n = $n + 1
 		}
-		if $current.is_empty() $out else $out.append({ line: $start, lines: $current })
+		if ($current.is_empty()) $out else $out.append({ line: $start, lines: $current })
 	}
 
 	## The value of a `# key = value` comment.
@@ -72,7 +72,7 @@ Conllu :: [].{
 		prefix = "# ${key} = "
 		match s.comments.keep_if(|c| c.starts_with(prefix)) {
 			[c, ..] => Ok(c.drop_prefix(prefix))
-			[] => if s.comments.contains("# ${key} =") Ok("") else Err(Missing)
+			[] => if (s.comments.contains("# ${key} =")) Ok("") else Err(Missing)
 		}
 	}
 
@@ -82,7 +82,7 @@ Conllu :: [].{
 		prefix = "# ${key} ="
 		line = "# ${key} = ${value}"
 		if s.comments.any(|c| c.starts_with(prefix)) {
-			{ ..s, comments: s.comments.map(|c| if c.starts_with(prefix) line else c) }
+			{ ..s, comments: s.comments.map(|c| if (c.starts_with(prefix)) line else c) }
 		} else {
 			{ ..s, comments: s.comments.append(line) }
 		}
@@ -93,7 +93,7 @@ Conllu :: [].{
 	is_word = |r| U64.from_str(r.id).is_ok()
 
 	misc_items : Row -> List(Str)
-	misc_items = |r| if r.misc == "_" [] else r.misc.split_on("|")
+	misc_items = |r| if (r.misc == "_") [] else r.misc.split_on("|")
 
 	## The value of a `key=value` MISC item.
 	misc : Row, Str -> Try(Str, [Missing])
@@ -107,7 +107,7 @@ Conllu :: [].{
 	set_misc = |r, key, value| {
 		items = misc_items(r)
 		item = "${key}=${value}"
-		next = if items.any(|i| i.starts_with("${key}=")) items.map(|i| if i.starts_with("${key}=") item else i) else items.append(item)
+		next = if (items.any(|i| i.starts_with("${key}="))) items.map(|i| if (i.starts_with("${key}=")) item else i) else items.append(item)
 		{ ..r, misc: Str.join_with(next, "|") }
 	}
 
@@ -115,7 +115,7 @@ Conllu :: [].{
 	drop_misc : Row, Str -> Row
 	drop_misc = |r, key| {
 		kept = misc_items(r).keep_if(|i| !i.starts_with("${key}="))
-		{ ..r, misc: if kept.is_empty() "_" else Str.join_with(kept, "|") }
+		{ ..r, misc: if (kept.is_empty()) "_" else Str.join_with(kept, "|") }
 	}
 
 	## The sentence's surface text: the forms of its word rows, or of a range in place of the words it covers.
