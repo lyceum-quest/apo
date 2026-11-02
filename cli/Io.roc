@@ -71,12 +71,17 @@ Io :: [].{
 		}
 	}
 
+	## An environment variable's value, or "" when it is unset.
+	env! : Str => Str
+	env! = |name| Env.var_str!(OsStr.from_str(name)) ?? ""
+
 	## The API key a model's provider names, or "" when it names none or the variable is unset.
 	key! : Provider.Model => Str
 	key! = |model| if (model.provider.key_env == "") "" else Env.var_str!(OsStr.from_str(model.provider.key_env)) ?? ""
 
-	is_terminal! : U64 => Bool
-	is_terminal! = |fd| match Cmd.new("test").args(["-t", OsStr.from_str(fd.to_str())]).run!() {
+	## Whether standard input is a terminal (the probe inherits it; a captured child would see a pipe).
+	stdin_is_terminal! : () => Bool
+	stdin_is_terminal! = || match Cmd.new("test").args(["-t", "0"]).stdin(Inherit).run!() {
 		Ok(output) => output.status == Exited(0)
 		Err(_) => Bool.False
 	}

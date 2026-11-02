@@ -1,14 +1,21 @@
+# newdoc id = crito
+# generator = apo 0.1.0
+# model = echo-1
+# config_sha256 = 7004c183b1efe476687a85081aeee5fca4ac61ff6c3a64f9737db5800ec92b77
+# generated_by = A Tester <tester@example.org>
+# sent_id = crito-1
+# text = ΣΩ .
 # sentence_id = 1
 # translation_lang = en
 # prose_translation = A sentence of 2 words.
-# literal_translation = a sentence of 2 words
 1	ΣΩ	σω	n	n-s---mv-	Case=v|Gender=m|Number=s	0	ExD	_	t_1|gloss=gloss-ΣΩ
 2	.	.	u	u--------	_	1	AuxK	_	t_2|gloss=gloss-.
 
+# sent_id = crito-2
+# text = τί τηνικάδε ἀφῖξαι , ὦ Κρίτων ;
 # sentence_id = 2
 # translation_lang = en
 # prose_translation = A sentence of 7 words.
-# literal_translation = a sentence of 7 words
 1	τί	τίς	p	p-s---na-	Case=a|Gender=n|Number=s	3	ADV	_	t_3|gloss=gloss-τί
 2	τηνικάδε	τηνικάδε	d	d--------	_	3	ADV	_	t_4|gloss=gloss-τηνικάδε
 3	ἀφῖξαι	ἀφικνέομαι	v	v2srie---	Mood=i|Number=s|Person=2|Tense=r|Voice=e	0	PRED	_	t_5|gloss=gloss-ἀφῖξαι
@@ -17,10 +24,11 @@
 6	Κρίτων	κρίτων	n	n-s---mv-	Case=v|Gender=m|Number=s	3	ExD	_	t_8|gloss=gloss-Κρίτων
 7	;	;	u	u--------	_	3	AuxK	_	t_9|gloss=gloss-;
 
+# sent_id = crito-3
+# text = ἢ οὐ πρῲ ἔτι ἐστίν ;
 # sentence_id = 3
 # translation_lang = en
 # prose_translation = A sentence of 6 words.
-# literal_translation = a sentence of 6 words
 1	ἢ	ἤ1	d	d--------	_	5	AuxY	_	t_10|gloss=gloss-ἢ
 2	οὐ	οὐ	d	d--------	_	5	AuxZ	_	t_11|gloss=gloss-οὐ
 3	πρῲ	πρωί	d	d--------	_	5	PNOM	_	t_12|gloss=gloss-πρῲ
@@ -28,20 +36,30 @@
 5	ἐστίν	εἰμί	v	v3spia---	Mood=i|Number=s|Person=3|Tense=p|Voice=a	0	PRED	_	t_14|gloss=gloss-ἐστίν
 6	;	;	u	u--------	_	5	AuxK	_	t_15|gloss=gloss-;
 
+# sent_id = crito-4
+# text = ΚΡ .
 # sentence_id = 4
 # translation_lang = en
 # prose_translation = A sentence of 2 words.
-# literal_translation = a sentence of 2 words
 1	ΚΡ	κρ	n	n-s---mn-	_	0	ExD	_	t_16|gloss=gloss-ΚΡ
 2	.	.	u	u--------	_	1	AuxK	_	t_17|gloss=gloss-.
 
+# sent_id = crito-5
+# text = πάνυ μὲν οὖν [0] .
 # sentence_id = 5
 # translation_lang = en
 # prose_translation = A sentence of 4 words.
-# literal_translation = a sentence of 4 words
 1	πάνυ	πάνυ	d	d--------	_	4	ADV	_	t_18|gloss=gloss-πάνυ
 2	μὲν	μέν	d	d--------	_	3	AuxZ	_	t_19|gloss=gloss-μὲν
 3	οὖν	οὖν	d	d--------	_	4	AuxY	_	t_20|gloss=gloss-οὖν
 4	[0]	[0]	-	---------	_	0	PRED	_	e_1
 5	.	.	u	u--------	_	4	AuxK	_	t_21|gloss=gloss-.
+
+# sent_id = crito-6
+# text = ΣΩ .
+# sentence_id = 6
+# translation_lang = en
+# prose_translation = A sentence of 2 words.
+1	ΣΩ	σω	n	n-s---mv-	Case=v|Gender=m|Number=s	0	ExD	_	t_22|gloss=gloss-ΣΩ
+2	.	.	u	u--------	_	1	AuxK	_	t_23|gloss=gloss-.
 

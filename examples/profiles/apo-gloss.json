@@ -1,7 +1,0 @@
-{
-  "name": "apo-gloss",
-  "required_comments": ["sentence_id", "prose_translation", "literal_translation"],
-  "unique_comments": ["sentence_id"],
-  "misc_required": ["gloss"],
-  "misc_exempt_prefixes": ["e_"]
-}

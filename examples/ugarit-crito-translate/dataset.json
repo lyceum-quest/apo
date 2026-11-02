@@ -1,7 +1,0 @@
-{
-  "name": "crito",
-  "title": "Plato, Crito",
-  "format": "tokens",
-  "gold": { "manifest": "../gold/ugarit-grc-eng.json", "input": "source", "reference": "target" },
-  "lines": [149, 168]
-}

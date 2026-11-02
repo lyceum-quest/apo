@@ -1,14 +1,12 @@
-# Runs a resolved run: each step over its items, every call through the run store, outputs rebuilt after each step.
-# A call whose request is in the store is answered from it; otherwise it goes to the model (paid calls only with
-# --paid, and never past the budget), its reply is checked, and an accepted reply is stored before it is used.
+# Runs a job: translates and glosses a work's sentences in order, then translates each citation passage its finished
+# sentences cover. Every accepted reply is appended to replies.jsonl, keyed by the SHA-256 of its request, before it
+# is used; a request found there is answered from it. So a rerun calls the model only for sentences not yet done, and
+# the outputs are rebuilt from replies whose requests match the current configuration, never from older ones.
 import pf.Cmd
 import pf.Duration
-import pf.Env
 import pf.Http
-import pf.OsStr
-import pf.Path
-import pf.Sleep
 import pf.Stderr
+import pf.Path
 import http.Request
 
 import apo.Conllu
@@ -21,462 +19,188 @@ import Io
 import Load
 
 Execute :: [].{
+	Report : { dir : Str, generated : U64, sentences : U64, total : U64, passages : U64, total_passages : U64 }
 
-	## Live calls models; Dry only counts calls; Seed answers calls from an archive work folder's outputs.
-	Mode : [Live({ paid : Bool }), Dry, Seed(Str)]
+	Ctx : { job : Load.Job, dir : Str, cache : Dict(Str, Str), key : Str }
 
-	StepReport : { kind : Str, items : U64, cached : U64, called : U64, failed : U64, planned : U64, estimate : Dec }
-
-	Report : { label : Str, dir : Str, status : Str, steps : List(StepReport), cost : Dec }
-
-	## The run's directory: its experiment, label, and a hash of everything that determines its output.
-	locate! : Load.Run, Str => Try({ id : Str, dir : Str, identity : JsonValue }, [Failed(Str)])
-	locate! = |run, version| {
-		selected = Dataset.selected(run.dataset, run.passages)
-		identity = JsonValue.object([
-			("apo", JsonValue.str(version)),
-			("model", Provider.identity(run.model, { system: "", user: "", max_tokens: 0 })),
-			("steps", JsonValue.list(run.steps.map(|s| JsonValue.object([("kind", JsonValue.str(Steps.name(s.kind))), ("system", JsonValue.str(s.system)), ("max_tokens", JsonValue.u64(s.max_tokens)), ("lang", JsonValue.str(s.lang)), ("punctuation", JsonValue.strs(s.punctuation))])))),
-			(
-				"dataset",
+	## Translates and glosses up to `count` sentences not yet done, and every passage they complete.
+	run! : Load.Job, U64, Bool, Str => Try(Report, [Failed(Str)])
+	run! = |job, count, fresh, version| {
+		dir = job.dir
+		fingerprint = Io.sha256!(
+			JsonValue.canonical(
 				JsonValue.object([
-					("name", JsonValue.str(run.dataset.name)),
-					("input", JsonValue.str(Io.sha256!(Conllu.serialize(run.sentences))?)),
-					("passages", JsonValue.list(selected.map(|p| Steps.unit(p, { prose: "", literal: "" })))),
-					("omitted", JsonValue.str(run.dataset.omitted_prefix)),
-					("reference", JsonValue.list(run.reference.map(JsonValue.strs))),
+					("model", Provider.identity(job.model, { system: "", user: "", max_tokens: 0 })),
+					("steps", JsonValue.list([job.translate, job.gloss, job.passage].map(|s| JsonValue.object([("kind", JsonValue.str(Steps.name(s.kind))), ("system", JsonValue.str(s.system)), ("max_tokens", JsonValue.u64(s.max_tokens))])))),
 				]),
 			),
-		])
-		id = Io.sha256!(JsonValue.canonical(identity))?
-		Ok({ id, dir: "${run.runs_dir}/${run.experiment}/${run.label}-${Str.from_utf8(id.to_utf8().take_first(10)) ?? id}", identity })
-	}
-
-	run! : Load.Run, Str, Mode => Try(Report, [Failed(Str)])
-	run! = |run, version, mode| {
-		located = locate!(run, version)?
-		dir = located.dir
-		selected = Dataset.selected(run.dataset, run.passages)
-		needed = Dataset.sentences_needed(run.dataset, run.sentences, selected)
-		var $sentences = run.sentences.take_first(needed)
+		)?
+		if !fresh {
+			unchanged!(dir, fingerprint)?
+		}
+		ctx = { job, dir, cache: cache!(dir)?, key: Io.key!(job.model) }
+		if job.model.provider.key_env != "" and ctx.key == "" {
+			return Err(Failed("set ${job.model.provider.key_env} for provider ${job.model.provider.name}"))
+		}
+		spec = job.work.spec
+		sentences = job.work.sentences
+		header = { name: job.work.name, model: job.model.id, fingerprint, version, author: job.author }
+		var $done = []
+		var $generated = 0
+		var $more = Bool.True
+		while $more and $done.len() < sentences.len() {
+			i = $done.len()
+			item = "sentence ${(i + 1).to_str()}"
+			sentence = sentences.get(i) ?? { line: 0, comments: [], rows: [] }
+			translate_call = { system: job.translate.system, user: JsonValue.canonical(Steps.sentence_input(spec, sentence)), max_tokens: job.translate.max_tokens }
+			translate_hash = hash!(job.model, translate_call)?
+			if !ctx.cache.contains(translate_hash) and $generated >= count {
+				$more = Bool.False
+			} else {
+				translation = answer!(ctx, TranslateSentence, item, translate_hash, translate_call, |content| Steps.check_translation(Steps.reply_object(content)?))?
+				translated = Steps.merge_translation(sentence, i, "en", translation.value)
+				gloss_call = { system: job.gloss.system, user: JsonValue.canonical(Steps.gloss_input(spec, translated)), max_tokens: job.gloss.max_tokens }
+				gloss_hash = hash!(job.model, gloss_call)?
+				if !ctx.cache.contains(gloss_hash) and !translation.called and $generated >= count {
+					$more = Bool.False
+				} else {
+					glosses = answer!(ctx, GlossTokens, item, gloss_hash, gloss_call, |content| Steps.check_glosses(spec, translated, ["u", "PUNCT"], Steps.reply_object(content)?))?
+					$done = $done.append(Steps.merge_glosses(translated, glosses.value))
+					if translation.called or glosses.called {
+						$generated = $generated + 1
+						write!(dir, header, $done, [], Bool.False)?
+						_ = Stderr.line!("${job.work.name}/${job.model.name}: ${item} of ${sentences.len().to_str()} done (${$generated.to_str()} new)")
+					}
+				}
+			}
+		}
+		# A passage is translated once every sentence holding its tokens is done.
+		var $finished = Dict.empty()
+		var $index = 0
+		for s in $done {
+			for t in Dataset.tokens(spec, $index, s) {
+				$finished = $finished.insert(t, {})
+			}
+			$index = $index + 1
+		}
 		var $units = []
-		var $links = []
-		var $spent = spent!(dir)
-		var $reports = []
-		var $status = "completed"
-		started = Io.now!()
-		if mode != Dry {
-			for (name, text) in run.sources {
-				Io.write!("${dir}/config/${name}", text)?
-			}
-			Io.write!("${dir}/manifest.json", JsonValue.pretty(manifest(run, version, located.id, started, "running", $spent)))?
-		}
-		ctx = { run, dir, mode, key: Io.key!(run.model) }
-		# Progress redraws one line, so it is shown only on a terminal.
-		terminal = Io.is_terminal!(2)
-		work = match mode {
-			Seed(folder) => {
-				parsed = Conllu.parse(Io.read!("${folder}/output.conllu")?).map_err(|e| Failed("${folder}: ${e.message}"))?
-				units = (Io.read!("${folder}/units.jsonl") ?? "").split_on("\n").keep_oks(|l| JsonValue.decode(l))
-				{ folder, sentences: parsed, units }
-			}
-			_ => { folder: "", sentences: [], units: [] }
-		}
-		for step in run.steps {
-			kind = Steps.name(step.kind)
-			var $report = { kind, items: 0, cached: 0, called: 0, failed: 0, planned: 0, estimate: 0 }
-			items = match step.kind {
-				TranslatePassage => selected.len()
-				_ => $sentences.len()
-			}
-			if step.kind == Align and run.reference.len() < items {
-				return Err(Failed("align needs a reference line for each of ${items.to_str()} sentences; the dataset has ${run.reference.len().to_str()}"))
-			}
-			if is_live(mode) and run.model.provider.batch {
-				var $calls = []
-				var $n = 0
-				while $n < items {
-					$calls = $calls.append(request(run, step, $sentences, selected, $n))
-					$n = $n + 1
-				}
-				batch!(ctx, kind, $calls)?
-			}
-			var $i = 0
-			while $i < items and $status == "completed" {
-				sentence = $sentences.get($i) ?? { line: 0, comments: [], rows: [] }
-				label = "${kind} ${($i + 1).to_str()}/${items.to_str()}"
-				_ = if (mode != Dry and terminal) Stderr.write!("\r\u(1b)[2K${run.label}: ${label} · $${money($spent)}") else Ok({})
-				call = request(run, step, $sentences, selected, $i)
-				seeded = match mode {
-					Seed(_) => seed!(ctx, step.kind, request(run, step, $sentences, selected, $i), work, $i, selected.get($i) ?? { ref: "", label: "", tokens: [] })
-					_ => Ok({})
-				}
-				result = match seeded {
-					Err(message) => Err(Stopped({ message, cost: 0 }))
-					Ok(_) => match step.kind {
-						TranslateSentence => call!(ctx, $spent, kind, $i, call, |content| Steps.check_translation(Steps.reply_object(content)?)).map_ok(|r| { cost: r.cost, cached: r.cached, apply: TranslatedSentence(r.value) })
-						GlossTokens => call!(ctx, $spent, kind, $i, call, |content| Steps.check_glosses(run.dataset, sentence, step.punctuation, Steps.reply_object(content)?)).map_ok(|r| { cost: r.cost, cached: r.cached, apply: Glossed(r.value) })
-						TranslatePassage => call!(ctx, $spent, kind, $i, call, |content| Steps.check_translation(Steps.reply_object(content)?)).map_ok(|r| { cost: r.cost, cached: r.cached, apply: TranslatedPassage(r.value) })
-						Align => call!(ctx, $spent, kind, $i, call, |content| Steps.check_links(Steps.reply_object(content)?, overt(run.dataset, sentence).len(), (run.reference.get($i) ?? []).len())).map_ok(|r| { cost: r.cost, cached: r.cached, apply: Aligned(r.value) })
-					}
-				}
-				$report = { ..$report, items: $report.items + 1 }
-				match result {
-					Ok(done) => {
-						$spent = $spent + done.cost
-						$report = if (done.cached) { ..$report, cached: $report.cached + 1 } else { ..$report, called: $report.called + 1 }
-						match done.apply {
-							TranslatedSentence(t) => {
-								$sentences = $sentences.set($i, Steps.merge_translation(sentence, $i, step.lang, t)) ?? $sentences
-							}
-							Glossed(g) => {
-								$sentences = $sentences.set($i, Steps.merge_glosses(sentence, g)) ?? $sentences
-							}
-							TranslatedPassage(t) => {
-								$units = $units.append(Steps.unit(selected.get($i) ?? { ref: "", label: "", tokens: [] }, t))
-							}
-							Aligned(pairs) => {
-								$links = $links.append(JsonValue.object([("sentence", JsonValue.u64($i + 1)), ("links", JsonValue.list(pairs.map(|(a, b)| JsonValue.list([JsonValue.u64(a), JsonValue.u64(b)]))))]))
-							}
-						}
-					}
-					Err(Planned(estimate)) => {
-						$report = { ..$report, planned: $report.planned + 1, estimate: $report.estimate + estimate }
-					}
-					Err(Stopped({ message, cost })) => {
-						$spent = $spent + cost
-						$status = "stopped: ${message}"
-					}
-					Err(Exhausted({ message, cost })) => {
-						$spent = $spent + cost
-						if run.skip_failures {
-							$report = { ..$report, failed: $report.failed + 1 }
-							if step.kind == Align {
-								$links = $links.append(JsonValue.object([("sentence", JsonValue.u64($i + 1)), ("links", JsonValue.list([])), ("failed", JsonValue.bool(Bool.True))]))
-							}
-						} else {
-							$status = "stopped: ${message}"
-						}
-					}
-					Err(Failed(message)) => return Err(Failed(message))
-				}
-				$i = $i + 1
-			}
-			$reports = $reports.append($report)
-			if mode != Dry {
-				write_outputs!(dir, run.dataset.name, $sentences, selected, $units, $links)?
+		for passage in job.work.passages {
+			if passage.tokens.all(|t| $finished.contains(t)) {
+				call = { system: job.passage.system, user: JsonValue.canonical(Steps.passage_input(spec, $done, passage)), max_tokens: job.passage.max_tokens }
+				translation = answer!(ctx, TranslatePassage, "passage ${passage.label}", hash!(job.model, call)?, call, |content| Steps.check_translation(Steps.reply_object(content)?))?
+				$units = $units.append(Steps.unit(passage, translation.value))
 			}
 		}
-		if mode != Dry {
-			_ = if (terminal) Stderr.write!("\r\u(1b)[2K") else Ok({})
-			Io.write!("${dir}/manifest.json", JsonValue.pretty(manifest(run, version, located.id, started, $status, $spent)))?
-		}
-		Ok({ label: run.label, dir, status: $status, steps: $reports, cost: $spent })
+		write!(dir, header, $done, $units, job.work.has_refs)?
+		Ok({ dir, generated: $generated, sentences: $done.len(), total: sentences.len(), passages: $units.len(), total_passages: job.work.passages.len() })
 	}
 
-	## The experiment's folder, whose store every run shares: a reply is reused by any run that makes the same request,
-	## so raising a limit or adding a step costs only the new calls.
-	shared : Ctx -> Str
-	shared = |ctx| "${ctx.run.runs_dir}/${ctx.run.experiment}"
-
-	is_live : Mode -> Bool
-	is_live = |mode| match mode {
-		Live(_) => Bool.True
-		_ => Bool.False
-	}
-
-	## Stores, as the reply to `call`, what an archive work folder holds for item `i`: a sentence's translations or
-	## glosses, or a passage's translations. The work's sentence must have the dataset sentence's forms.
-	seed! = |ctx, kind, call, work, i, passage| {
-		identity = Provider.identity(ctx.run.model, call)
-		hash = Io.sha256!(JsonValue.canonical(identity)).map_err(|_| "cannot hash")?
-		stored = "${shared(ctx)}/store/${hash}.json"
-		if Io.exists!(stored) {
+	## Stops a run that would mix outputs: the folder's output was made with another model, prompt, context, or limit.
+	unchanged! : Str, Str => Try({}, [Failed(Str)])
+	unchanged! = |dir, fingerprint| {
+		path = "${dir}/output.conllu"
+		if !Io.exists!(path) {
 			return Ok({})
 		}
-		source = ctx.run.sentences.get(i) ?? { line: 0, comments: [], rows: [] }
-		from_work = if (kind == TranslatePassage) source else work.sentences.get(i) ?? return Err("the work has no sentence ${(i + 1).to_str()}")
-		if from_work.rows.map(|r| r.form) != source.rows.map(|r| r.form) {
-			return Err("sentence ${(i + 1).to_str()} of the work differs from the dataset")
+		first = match Conllu.parse(Io.read!(path)?) {
+			Ok([s, ..]) => s
+			_ => return Ok({})
 		}
-		translation = |prose, literal| JsonValue.object([("prose_translation", JsonValue.str(prose)), ("literal_translation", JsonValue.str(literal))])
-		content = match kind {
-			TranslateSentence => match (Conllu.comment(from_work, "prose_translation"), Conllu.comment(from_work, "literal_translation")) {
-				(Ok(p), Ok(l)) => translation(p, l)
-				_ => return Err("sentence ${(i + 1).to_str()} of the work has no translations")
-			}
-			GlossTokens => {
-				glossed = from_work.rows.keep_oks(|r| Conllu.misc(r, "gloss").map_ok(|g| JsonValue.object([("id", JsonValue.str(r.id)), ("gloss", JsonValue.str(g))])))
-				if glossed.is_empty() {
-					return Err("sentence ${(i + 1).to_str()} of the work has no glosses")
-				}
-				JsonValue.object([("glosses", JsonValue.list(glossed))])
-			}
-			TranslatePassage => match work.units.keep_if(|u| (u.field("ref") ?? JsonValue.null).as_str() == Ok(passage.ref)) {
-				[u, ..] => translation((u.field("prose") ?? JsonValue.str("")).as_str() ?? "", (u.field("literal") ?? JsonValue.str("")).as_str() ?? "")
-				[] => return Err("the work has no passage ${passage.ref}")
-			}
-			Align => return Err("alignments cannot be seeded")
-		}
-		record = JsonValue.object([("request", identity), ("reply", JsonValue.object([("content", JsonValue.str(JsonValue.encode(content))), ("input_tokens", JsonValue.u64(0)), ("output_tokens", JsonValue.u64(0)), ("cache_read_tokens", JsonValue.u64(0))])), ("cost_usd", JsonValue.dec(0)), ("seeded_from", JsonValue.str(work.folder))])
-		Io.write!(stored, JsonValue.pretty(record)).map_err(|_| "cannot write ${stored}")
-	}
-
-	## The call for item `i` of a step, given the sentences as earlier steps left them.
-	request : Load.Run, Load.Step, List(Conllu.Sentence), List(Dataset.Passage), U64 -> Provider.Call
-	request = |run, step, sentences, selected, i| {
-		sentence = sentences.get(i) ?? { line: 0, comments: [], rows: [] }
-		user = match step.kind {
-			TranslateSentence => Steps.sentence_input(run.dataset, sentence)
-			GlossTokens => Steps.gloss_input(run.dataset, sentence)
-			TranslatePassage => Steps.passage_input(run.dataset, sentences, selected.get(i) ?? { ref: "", label: "", tokens: [] })
-			Align => Steps.align_input(overt(run.dataset, sentence), run.reference.get(i) ?? [])
-		}
-		{ system: step.system, user: JsonValue.canonical(user), max_tokens: step.max_tokens }
-	}
-
-	## Sends a step's calls that are not in the store as one batch, waits for it to end, and keeps each result in
-	## batch/ until `call!` has checked it.
-	batch! : Ctx, Str, List(Provider.Call) => Try({}, [Failed(Str)])
-	batch! = |ctx, kind, calls| {
-		var $pending = []
-		for c in calls {
-			hash = Io.sha256!(JsonValue.canonical(Provider.identity(ctx.run.model, c)))?
-			if !Io.exists!("${shared(ctx)}/store/${hash}.json") and !Io.exists!("${shared(ctx)}/batch/${hash}.json") and !$pending.any(|(h, _)| h == hash) {
-				$pending = $pending.append((hash, c))
-			}
-		}
-		if $pending.is_empty() {
-			return Ok({})
-		}
-		if Provider.paid(ctx.run.model) and ctx.mode == Live({ paid: Bool.False }) {
-			return Err(Failed("${ctx.run.model.name} is a paid provider; rerun with --paid"))
-		}
-		_ = Stderr.line!("${ctx.run.label}: submitting ${$pending.len().to_str()} ${kind} call(s) as a batch")
-		submitted = Provider.batch_status(send!(Provider.batch_submit(ctx.run.model, $pending, ctx.key), ctx.run.timeout_seconds).map_err(|e| Failed(e))?).map_err(|e| Failed(e))?
-		Io.write!("${shared(ctx)}/batch/${submitted.id}.submitted", "")?
-		var $status = submitted
-		while !$status.ended {
-			_ = Sleep.millis!(30000)
-			$status = Provider.batch_status(send!(Provider.batch_poll(ctx.run.model, submitted.id, ctx.key), ctx.run.timeout_seconds).map_err(|e| Failed(e))?).map_err(|e| Failed(e))?
-		}
-		results = send!(Provider.batch_fetch(ctx.run.model, $status.results_url, ctx.key), ctx.run.timeout_seconds).map_err(|e| Failed(e))?
-		for (hash, outcome) in Provider.batch_results(results) {
-			match outcome {
-				Ok(body) => Io.write!("${shared(ctx)}/batch/${hash}.json", body)?
-				Err(message) => event!(ctx.dir, kind, 0, 1, Bool.False, { input: 0, output: 0, cache_read: 0 }, 0, 0, "error", message)?
-			}
-		}
-		Ok({})
-	}
-
-	overt : Dataset.Spec, Conllu.Sentence -> List(Str)
-	overt = |spec, s| s.rows.keep_if(|r| !Dataset.is_omitted(spec, r)).map(|r| r.form)
-
-	write_outputs! = |dir, name, sentences, passages, units, links| {
-		Io.write!("${dir}/output/${name}.conllu", Conllu.serialize(sentences))?
-		Io.write!("${dir}/output/passages.jsonl", Str.join_with(passages.map(|p| "${JsonValue.encode(JsonValue.object([("ref", JsonValue.str(p.ref)), ("label", JsonValue.str(p.label)), ("tokens", JsonValue.strs(p.tokens))]))}\n"), ""))?
-		if !units.is_empty() {
-			Io.write!("${dir}/output/units.jsonl", Str.join_with(units.map(|u| "${JsonValue.canonical(u)}\n"), ""))?
-		}
-		if !links.is_empty() {
-			Io.write!("${dir}/output/alignments.jsonl", Str.join_with(links.map(|l| "${JsonValue.encode(l)}\n"), ""))?
-		}
-		Ok({})
-	}
-
-	## Money already spent by this run's earlier calls, from its event log.
-	spent! : Str => Dec
-	spent! = |dir| {
-		var $total = 0
-		for line in (Io.read!("${dir}/events.jsonl") ?? "").split_on("\n") {
-			match JsonValue.decode(line) {
-				Ok(event) => {
-					$total = $total + ((event.field("cost") ?? JsonValue.Number("0")).as_dec() ?? 0)
-				}
-				Err(_) => {}
-			}
-		}
-		$total
-	}
-
-	manifest = |run, version, id, started, status, spent| JsonValue.object([
-		("apo", JsonValue.str(version)),
-		("run", JsonValue.str(id)),
-		("experiment", JsonValue.str(run.experiment)),
-		("label", JsonValue.str(run.label)),
-		("model", JsonValue.object([("name", JsonValue.str(run.model.name)), ("provider", JsonValue.str(run.model.provider.name)), ("protocol", JsonValue.str(Provider.protocol_name(run.model.provider.protocol))), ("id", JsonValue.str(run.model.id)), ("options", run.model.options)])),
-		(
-			"dataset",
-			JsonValue.object([
-				("name", JsonValue.str(run.dataset.name)),
-				("title", JsonValue.str(run.dataset.title)),
-				("input", JsonValue.str(run.dataset.input)),
-				("passages", JsonValue.u64(Dataset.selected(run.dataset, run.passages).len())),
-				("token_ids", JsonValue.str(if (run.dataset.token_ids == Position) "position" else "misc-first")),
-				(
-					"first_line",
-					JsonValue.u64(
-						match run.dataset.lines {
-							AllLines => 1
-							Lines(first, _) => first
-						},
-					),
-				),
-			]),
-		),
-		("steps", JsonValue.list(run.steps.map(|s| JsonValue.object([("kind", JsonValue.str(Steps.name(s.kind))), ("prompt", JsonValue.str(s.prompt_file)), ("max_tokens", JsonValue.u64(s.max_tokens))])))),
-		("limits", JsonValue.object([("attempts", JsonValue.u64(run.attempts)), ("timeout_seconds", JsonValue.u64(run.timeout_seconds)), ("budget_usd", JsonValue.dec(run.budget))])),
-		("started", JsonValue.str(started)),
-		("status", JsonValue.str(status)),
-		("cost_usd", JsonValue.dec(spent)),
-		("replayable", JsonValue.bool(Bool.True)),
-	])
-
-	money : Dec -> Str
-	money = |n| {
-		text = n.to_str()
-		match text.split_on(".") {
-			[whole, fraction] => "${whole}.${Str.from_utf8(fraction.concat("0000").to_utf8().take_first(4)) ?? "0000"}"
-			_ => "${text}.0000"
+		if Conllu.comment(first, "config_sha256") == Ok(fingerprint) {
+			Ok({})
+		} else {
+			model = Conllu.comment(first, "model") ?? "an unknown model"
+			Err(Failed("${path} was made by ${model} with a different model, prompt, context or limit. Write to another output_dir, or pass --fresh to start this work over."))
 		}
 	}
 
-	Ctx : { run : Load.Run, dir : Str, mode : Mode, key : Str }
+	## Accepted replies by request hash.
+	cache! : Str => Try(Dict(Str, Str), [Failed(Str)])
+	cache! = |dir| {
+		var $out = Dict.empty()
+		for line in (Io.read!("${dir}/replies.jsonl") ?? "").split_on("\n") {
+			if line.trim() != "" {
+				record = JsonValue.decode(line).map_err(|m| Failed("${dir}/replies.jsonl: ${m}"))?
+				text = |key| (record.field(key) ?? JsonValue.null).as_str() ?? ""
+				$out = $out.insert(text("request_sha256"), text("content"))
+			}
+		}
+		Ok($out)
+	}
 
-	## One call through the store. `check` turns the reply's text into an accepted value or a reason to retry.
-	call! : Ctx, Dec, Str, U64, Provider.Call, (Str -> Try(a, Str)) => Try({ value : a, cost : Dec, cached : Bool }, [Failed(Str), Planned(Dec), Stopped({ message : Str, cost : Dec }), Exhausted({ message : Str, cost : Dec })])
-	call! = |ctx, spent, kind, index, call, check| {
-		identity = Provider.identity(ctx.run.model, call)
-		hash = Io.sha256!(JsonValue.canonical(identity))?
-		stored = "${shared(ctx)}/store/${hash}.json"
-		item = index + 1
-		if Io.exists!(stored) {
-			record = Io.json!(stored)?
-			content = ((record.field("reply") ?? JsonValue.null).field("content") ?? JsonValue.null).as_str() ?? ""
-			value = check(content).map_err(|m| Failed("${stored} no longer passes the ${kind} checks: ${m}"))?
-			if ctx.mode != Dry {
-				event!(ctx.dir, kind, item, 0, Bool.True, { input: 0, output: 0, cache_read: 0 }, 0, 0, "accepted", "")?
+	hash! : Provider.Model, Provider.Call => Try(Str, [Failed(Str)])
+	hash! = |model, call| Io.sha256!(JsonValue.canonical(Provider.identity(model, call)))
+
+	## The accepted value of a call: from the cache, or from the model, retried until a reply passes `check`.
+	answer! : Ctx, Steps.Kind, Str, Str, Provider.Call, (Str -> Try(a, Str)) => Try({ value : a, called : Bool }, [Failed(Str)])
+	answer! = |ctx, kind, item, hash, call, check| {
+		step = Steps.name(kind)
+		match ctx.cache.get(hash) {
+			Ok(content) => {
+				value = check(content).map_err(|m| Failed("${ctx.dir}/replies.jsonl: the stored ${step} reply for ${item} no longer passes its checks: ${m}"))?
+				return Ok({ value, called: Bool.False })
 			}
-			return Ok({ value, cost: 0, cached: Bool.True })
+			Err(_) => {}
 		}
-		provisional = "${shared(ctx)}/batch/${hash}.json"
-		if ctx.mode != Dry and Io.exists!(provisional) {
-			body = Io.read!(provisional)?
-			match Provider.reply(ctx.run.model, body) {
-				Ok(reply) => {
-					# Batched calls cost half the list price.
-					cost = Provider.cost(ctx.run.model, reply) / 2
-					tokens = { input: reply.input_tokens, output: reply.output_tokens, cache_read: reply.cache_read_tokens }
-					match check(reply.content) {
-						Ok(value) => {
-							Io.write!(stored, JsonValue.pretty(JsonValue.object([("request", identity), ("reply", JsonValue.object([("content", JsonValue.str(reply.content)), ("input_tokens", JsonValue.u64(reply.input_tokens)), ("output_tokens", JsonValue.u64(reply.output_tokens)), ("cache_read_tokens", JsonValue.u64(reply.cache_read_tokens))])), ("cost_usd", JsonValue.dec(cost)), ("latency_ms", JsonValue.u64(0)), ("attempt", JsonValue.u64(1)), ("batch", JsonValue.bool(Bool.True))])))?
-							event!(ctx.dir, kind, item, 1, Bool.False, tokens, cost, 0, "accepted", "batch")?
-							_ = Path.delete!(Path.unix(provisional))
-							return Ok({ value, cost, cached: Bool.False })
-						}
-						Err(message) => {
-							event!(ctx.dir, kind, item, 1, Bool.False, tokens, cost, 0, "rejected", "batch: ${message}")?
-						}
-					}
-				}
-				Err(message) => {
-					event!(ctx.dir, kind, item, 1, Bool.False, { input: 0, output: 0, cache_read: 0 }, 0, 0, "error", "batch: ${message}")?
-				}
-			}
-			_ = Path.rename!(Path.unix(provisional), Path.unix("${ctx.dir}/rejected/${hash}-batch.json"))
-		}
-		if ctx.mode != Dry and !is_live(ctx.mode) {
-			return Err(Stopped({ message: "item ${item.to_str()} of ${kind} is not in the seeding work", cost: 0 }))
-		}
-		if ctx.mode == Dry {
-			tokens = (call.system.to_utf8().len() + call.user.to_utf8().len()) // 3
-			estimate = (tokens.to_dec() * ctx.run.model.prices.input + call.max_tokens.to_dec() * ctx.run.model.prices.output) / 1000000
-			return Err(Planned(estimate))
-		}
-		if Provider.paid(ctx.run.model) and ctx.mode == Live({ paid: Bool.False }) {
-			return Err(Stopped({ message: "${ctx.run.model.name} is a paid provider; rerun with --paid", cost: 0 }))
-		}
-		if ctx.run.model.provider.key_env != "" and ctx.key == "" {
-			return Err(Failed("set ${ctx.run.model.provider.key_env} for provider ${ctx.run.model.provider.name}"))
-		}
-		var $cost = 0
 		var $last = ""
 		var $attempt = 1
-		while $attempt <= ctx.run.attempts {
-			if ctx.run.budget > 0 and spent + $cost >= ctx.run.budget {
-				return Err(Stopped({ message: "budget of $${money(ctx.run.budget)} reached", cost: $cost }))
-			}
-			started = Io.millis!()
-			sent = send!(Provider.outbound(ctx.run.model, call, ctx.key), ctx.run.timeout_seconds)
-			latency = Io.millis!() - started
-			replied = match sent {
-				Ok(body) => Provider.reply(ctx.run.model, body)
+		while $attempt <= ctx.job.attempts {
+			replied = match send!(Provider.outbound(ctx.job.model, call, ctx.key), ctx.job.timeout_seconds) {
+				Ok(body) => Provider.reply(ctx.job.model, body)
 				Err(m) => Err(m)
 			}
 			match replied {
-				Ok(reply) => {
-					cost = Provider.cost(ctx.run.model, reply)
-					$cost = $cost + cost
-					tokens = { input: reply.input_tokens, output: reply.output_tokens, cache_read: reply.cache_read_tokens }
-					match check(reply.content) {
-						Ok(value) => {
-							record = JsonValue.object([
-								("request", identity),
-								("reply", JsonValue.object([("content", JsonValue.str(reply.content)), ("input_tokens", JsonValue.u64(reply.input_tokens)), ("output_tokens", JsonValue.u64(reply.output_tokens)), ("cache_read_tokens", JsonValue.u64(reply.cache_read_tokens))])),
-								("cost_usd", JsonValue.dec(cost)),
-								("latency_ms", JsonValue.u64(latency)),
-								("attempt", JsonValue.u64($attempt)),
-							])
-							Io.write!(stored, JsonValue.pretty(record))?
-							event!(ctx.dir, kind, item, $attempt, Bool.False, tokens, cost, latency, "accepted", "")?
-							return Ok({ value, cost: $cost, cached: Bool.False })
-						}
-						Err(message) => {
-							Io.write!("${ctx.dir}/rejected/${hash}-${$attempt.to_str()}.json", JsonValue.pretty(JsonValue.object([("request", identity), ("content", JsonValue.str(reply.content)), ("reason", JsonValue.str(message))])))?
-							event!(ctx.dir, kind, item, $attempt, Bool.False, tokens, cost, latency, "rejected", message)?
-							$last = message
-						}
+				Ok(reply) => match check(reply.content) {
+					Ok(value) => {
+						record = JsonValue.object([
+							("step", JsonValue.str(step)),
+							("item", JsonValue.str(item)),
+							("request_sha256", JsonValue.str(hash)),
+							("content", JsonValue.str(reply.content)),
+							("input_tokens", JsonValue.u64(reply.input_tokens)),
+							("output_tokens", JsonValue.u64(reply.output_tokens)),
+						])
+						Io.mkdir!(ctx.dir)?
+						Io.append!("${ctx.dir}/replies.jsonl", "${JsonValue.encode(record)}\n")?
+						return Ok({ value, called: Bool.True })
+					}
+					Err(message) => {
+						$last = "${message}; the reply began: ${Str.from_utf8(reply.content.to_utf8().take_first(300)) ?? ""}"
 					}
 				}
 				Err(message) => {
-					event!(ctx.dir, kind, item, $attempt, Bool.False, { input: 0, output: 0, cache_read: 0 }, 0, latency, "error", message)?
 					$last = message
 				}
 			}
 			$attempt = $attempt + 1
 		}
-		Err(Exhausted({ message: "${kind} item ${item.to_str()} failed after ${ctx.run.attempts.to_str()} attempt(s): ${$last}", cost: $cost }))
+		Err(Failed("${step} for ${item} failed after ${ctx.job.attempts.to_str()} attempt(s): ${$last}"))
 	}
 
-	event! = |dir, kind, item, attempt, cached, tokens, cost, latency, outcome, message|
-		Io.append!(
-			"${dir}/events.jsonl",
-			"${
-				JsonValue.encode(
-					JsonValue.object([
-						("at", JsonValue.str(Io.now!())),
-						("step", JsonValue.str(kind)),
-						("item", JsonValue.u64(item)),
-						("attempt", JsonValue.u64(attempt)),
-						("cached", JsonValue.bool(cached)),
-						("input_tokens", JsonValue.u64(tokens.input)),
-						("output_tokens", JsonValue.u64(tokens.output)),
-						("cache_read_tokens", JsonValue.u64(tokens.cache_read)),
-						("cost", JsonValue.dec(cost)),
-						("latency_ms", JsonValue.u64(latency)),
-						("outcome", JsonValue.str(outcome)),
-						("message", JsonValue.str(message)),
-					]),
-				)
-			}\n",
-		)
+	## Writes output.conllu (the done sentences, the first carrying the header) and, for a work with citations,
+	## units.jsonl.
+	write! = |dir, header, sentences, units, with_units| {
+		var $out = []
+		for s in sentences {
+			n = $out.len() + 1
+			sent_id = if (Conllu.comment(s, "sent_id").is_ok()) [] else ["# sent_id = ${header.name}-${n.to_str()}"]
+			text = if (Conllu.comment(s, "text").is_ok()) [] else ["# text = ${Conllu.text(s)}"]
+			own = sent_id.concat(text)
+			first = if (n == 1) ["# newdoc id = ${header.name}", "# generator = apo ${header.version}", "# model = ${header.model}", "# config_sha256 = ${header.fingerprint}"].concat(if (header.author == "") [] else ["# generated_by = ${header.author}"]) else []
+			$out = $out.append({ ..s, comments: first.concat(own).concat(s.comments) })
+		}
+		Io.write!("${dir}/output.conllu", Conllu.serialize($out))?
+		if with_units {
+			Io.write!("${dir}/units.jsonl", Str.join_with(units.map(|u| "${JsonValue.canonical(u)}\n"), ""))?
+		}
+		Ok({})
+	}
 
 	## The response body of a call, or why there is none.
 	send! : Provider.Outbound, U64 => Try(Str, Str)
 	send! = |outbound, timeout_seconds| match outbound {
 		Http(h) => {
-			var $request = Request.from_method(if (h.method == Get) GET else POST).with_uri(h.url).with_body(h.body.to_utf8()).with_timeout(TimeoutMilliseconds(timeout_seconds * 1000))
+			var $request = Request.from_method(POST).with_uri(h.url).with_body(h.body.to_utf8()).with_timeout(TimeoutMilliseconds(timeout_seconds * 1000))
 			for (name, value) in h.headers {
 				$request = $request.add_header(name, value)
 			}
