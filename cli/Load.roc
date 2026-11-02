@@ -1,171 +1,140 @@
-# Reads an experiment and everything it names, and resolves it into runs: one per model and prompt variant, each with
-# its rendered prompts, dataset, and limits. Paths in a file are relative to that file's folder.
+# Reads the configuration and the works directory, and resolves them into jobs: one per work and model, each with
+# its rendered prompts. Paths in the configuration are relative to its folder.
+import apo.Config
 import apo.Conllu
 import apo.Dataset
-import apo.Gold
 import apo.JsonValue
 import apo.Provider
 import apo.Steps
 import apo.Template
 
-import Evaluate
 import Io
 
 Load :: [].{
-	Step : { kind : Steps.Kind, prompt_file : Str, system : Str, max_tokens : U64, lang : Str, punctuation : List(Str) }
+	Step : { kind : Steps.Kind, system : Str, max_tokens : U64 }
 
-	Run : {
-		experiment : Str,
-		label : Str,
-		model : Provider.Model,
-		steps : List(Step),
-		dataset : Dataset.Spec,
-		sentences : List(Conllu.Sentence),
-		passages : List(Dataset.Passage),
-		reference : List(List(Str)),
-		attempts : U64,
-		timeout_seconds : U64,
-		skip_failures : Bool,
-		budget : Dec,
-		runs_dir : Str,
-		sources : List((Str, Str)),
+	Work : { name : Str, spec : Dataset.Spec, sentences : List(Conllu.Sentence), passages : List(Dataset.Passage), has_refs : Bool }
+
+	Job : { work : Work, model : Provider.Model, translate : Step, gloss : Step, passage : Step, dir : Str, attempts : U64, timeout_seconds : U64, author : Str }
+
+	## Prompt templates, by step.
+	Prompts : { translate : Str, gloss : Str, passage : Str }
+
+	## The configuration file: `given` (from --config), else $APO_CONFIG, else $XDG_CONFIG_HOME/apo/config.json, else
+	## ~/.config/apo/config.json.
+	config_path! : Str => Str
+	config_path! = |given| {
+		if given != "" {
+			return given
+		}
+		explicit = Io.env!("APO_CONFIG")
+		if explicit != "" {
+			return explicit
+		}
+		xdg = Io.env!("XDG_CONFIG_HOME")
+		if (xdg != "") "${xdg}/apo/config.json" else "${Io.env!("HOME")}/.config/apo/config.json"
 	}
 
-	experiment! : Str => Try({ name : Str, runs : List(Run) }, [Failed(Str)])
-	experiment! = |path| {
+	## The jobs a run makes: every work and model, or only those named in `works` and `models`.
+	jobs! : Str, Prompts, List(Str), List(Str) => Try(List(Job), [Failed(Str)])
+	jobs! = |path, defaults, works, models| {
+		if !Io.exists!(path) {
+			return Err(Failed("no configuration at ${path}; run `apo init` first"))
+		}
 		dir = Io.dir_of(path)
-		json = Io.json!(path)?
-		text = |key, default| (json.field(key) ?? JsonValue.str(default)).as_str() ?? default
-		name = text("name", Io.stem(path))
-		providers_path = Io.join(dir, text("providers", "providers.json"))
-		configured = Provider.settings(Io.json!(providers_path)?).map_err(|m| Failed("${providers_path}: ${m}"))?
-		# A command named by a relative path is relative to providers.json, like every other path.
-		providers = configured.map(
-			|p| match p.protocol {
-				Command([program, .. as rest]) if program.contains("/") => { ..p, protocol: Command(rest.prepend(Io.join(Io.dir_of(providers_path), program))) }
-				_ => p
+		settings = Config.parse(Io.json!(path)?).map_err(|m| Failed("${path}: ${m}"))?
+		# A command named by a relative path is relative to the configuration, like every other path.
+		all_models = settings.models.map(
+			|m| match m.provider.protocol {
+				Command([program, .. as rest]) if program.contains("/") => { ..m, provider: { ..m.provider, protocol: Command(rest.prepend(Io.join(dir, program))) } }
+				_ => m
 			},
 		)
-		dataset_path = Io.join(dir, text("dataset", "dataset.json"))
-		dataset = dataset!(dataset_path)?
-		pipeline_path = Io.join(dir, text("pipeline", "pipeline.json"))
-		pipeline = Io.json!(pipeline_path)?
-		limits = pipeline.field("limits") ?? JsonValue.object([])
-		attempts = (limits.field("attempts") ?? JsonValue.Number("3")).as_u64() ?? 3
-		timeout_seconds = (limits.field("timeout_seconds") ?? JsonValue.Number("180")).as_u64() ?? 180
-		skip_failures = match (limits.field("on_failure") ?? JsonValue.str("stop")).as_str() ?? "" {
-			"stop" => Bool.False
-			"skip" => Bool.True
-			other => return Err(Failed("${pipeline_path}: limits.on_failure must be stop or skip, not ${other}"))
+		chosen_models = pick(all_models.map(|m| m.name), models, "model")?
+		works_dir = Io.join(dir, settings.works_dir)
+		available = Io.list!(works_dir).keep_if(|p| p.ends_with(".conllu")).map(Io.stem).sort_with(JsonValue.compare)
+		if available.is_empty() {
+			return Err(Failed("${works_dir} has no .conllu files"))
 		}
-		budget = (json.field("budget_usd") ?? JsonValue.Number("0")).as_dec() ?? 0
-		runs_dir = Io.join(dir, text("runs", "runs"))
-
-		var $fixed = [("title", dataset.spec.title)]
-		var $sources = [("experiment.json", JsonValue.pretty(json)), ("providers.json", Io.read!(providers_path)?), ("dataset.json", Io.read!(dataset_path)?), ("pipeline.json", Io.read!(pipeline_path)?)]
-		for (key, v) in (json.field("variables") ?? JsonValue.object([])).fields() {
-			value = match v.as_str() {
-				Ok(file) => {
-					content = Io.read!(Io.join(dir, file))?
-					$sources = $sources.append(("variables/${Io.stem(file)}.md", content))
-					content.trim()
-				}
-				Err(_) => (v.field("text") ?? JsonValue.str("")).as_str() ?? ""
-			}
-			$fixed = $fixed.append((key, value))
-		}
-		var $variants = [{ label: "", values: [] }]
-		for (key, options) in (json.field("variants") ?? JsonValue.object([])).fields() {
-			var $next = []
-			for v in $variants {
-				for option in options.items() {
-					file = option.as_str() ?? ""
-					content = Io.read!(Io.join(dir, file))?
-					$sources = $sources.append(("variants/${key}/${Io.stem(file)}.md", content))
-					label = if (v.label == "") Io.stem(file) else "${v.label}-${Io.stem(file)}"
-					$next = $next.append({ label, values: v.values.append((key, content.trim())) })
-				}
-			}
-			$variants = $next
-		}
-
-		var $runs = []
-		for m in (json.field("models") ?? JsonValue.list([])).items() {
-			model = Provider.model(m, providers).map_err(|e| Failed("${path}: ${e}"))?
-			for variant in $variants {
-				variables = $fixed.concat(variant.values)
-				var $steps = []
-				for s in (pipeline.field("steps") ?? JsonValue.list([])).items() {
-					stext = |key, default| (s.field(key) ?? JsonValue.str(default)).as_str() ?? default
-					kind = Steps.kind(stext("kind", "")).map_err(|e| Failed("${pipeline_path}: ${e}"))?
-					prompt_file = Io.join(Io.dir_of(pipeline_path), stext("prompt", ""))
-					template = Io.read!(prompt_file)?
-					system = Template.render(template.trim(), variables).map_err(|e| Failed("${prompt_file}: ${e}"))?
-					punctuation = (s.field("punctuation_upos") ?? JsonValue.strs(["u", "PUNCT"])).items().map(|u| u.as_str() ?? "")
-					$steps = $steps.append({ kind, prompt_file, system, max_tokens: (s.field("max_tokens") ?? JsonValue.Number("1024")).as_u64() ?? 1024, lang: stext("lang", "en"), punctuation })
-				}
-				if $steps.is_empty() {
-					return Err(Failed("${pipeline_path}: no steps"))
-				}
-				label = if (variant.label == "") model.name else "${model.name}-${variant.label}"
-				$runs = $runs.append({ experiment: name, label, model, steps: $steps, dataset: dataset.spec, sentences: dataset.sentences, passages: dataset.passages, reference: dataset.reference, attempts, timeout_seconds, skip_failures, budget, runs_dir, sources: $sources })
+		for w in settings.works {
+			if !available.contains(w.name) {
+				return Err(Failed("${path}: works.${w.name} names no work in ${works_dir}"))
 			}
 		}
-		for (prompt_name, prompt_text) in prompt_sources!(pipeline, pipeline_path)? {
-			$sources = $sources.append((prompt_name, prompt_text))
+		prompts = prompts!(Io.join(dir, settings.prompts_dir), settings.prompts_dir, defaults)?
+		var $jobs = []
+		for name in pick(available, works, "work")? {
+			separator = match settings.works.keep_if(|w| w.name == name) {
+				[w, ..] => w.label_separator
+				[] => "."
+			}
+			work = work!(works_dir, name, separator)?
+			context = work.context
+			for model in all_models.keep_if(|m| chosen_models.contains(m.name)) {
+				step = |kind, template, max_tokens| {
+					system = Template.render(template.trim(), [("title", work.value.spec.title), ("context", context)]).map_err(|e| Failed("${Steps.name(kind)} prompt: ${e}"))?
+					Ok({ kind, system, max_tokens })
+				}
+				l = settings.limits
+				$jobs = $jobs.append({
+					work: work.value,
+					model,
+					translate: step(TranslateSentence, prompts.translate, l.translate_tokens)?,
+					gloss: step(GlossTokens, prompts.gloss, l.gloss_tokens)?,
+					passage: step(TranslatePassage, prompts.passage, l.passage_tokens)?,
+					dir: "${Io.join(dir, settings.output_dir)}/${name}/${model.name}",
+					attempts: l.attempts,
+					timeout_seconds: l.timeout_seconds,
+					author: settings.author,
+				})
+			}
 		}
-		Ok({ name, runs: $runs.map(|r| { ..r, sources: $sources }) })
+		Ok($jobs)
 	}
 
-	prompt_sources! = |pipeline, pipeline_path| {
-		var $out = []
-		for s in (pipeline.field("steps") ?? JsonValue.list([])).items() {
-			file = (s.field("prompt") ?? JsonValue.str("")).as_str() ?? ""
-			$out = $out.append(("prompts/${Io.stem(file)}.md", Io.read!(Io.join(Io.dir_of(pipeline_path), file))?))
+	## `wanted` (all of `names` when empty), or an error naming the first unknown one.
+	pick : List(Str), List(Str), Str -> Try(List(Str), [Failed(Str)])
+	pick = |names, wanted, what| {
+		for w in wanted {
+			if !names.contains(w) {
+				return Err(Failed("no ${what} named ${w}; there are ${Str.join_with(names, ", ")}"))
+			}
 		}
-		Ok($out)
+		Ok(if (wanted.is_empty()) names else names.keep_if(|n| wanted.contains(n)))
 	}
 
-	## A dataset's spec, sentences, passages (all of them; runs apply the limit), and reference token lines.
-	dataset! : Str => Try({ spec : Dataset.Spec, sentences : List(Conllu.Sentence), passages : List(Dataset.Passage), reference : List(List(Str)) }, [Failed(Str)])
-	dataset! = |path| {
-		dir = Io.dir_of(path)
-		json = Io.json!(path)?
-		# `"gold": { "manifest", "input", "reference" }` reads the input and reference from a gold set's files.
-		from_gold = match json.field("gold") {
-			Ok(g) => {
-				manifest_path = Io.join(dir, (g.field("manifest") ?? JsonValue.str("")).as_str() ?? "")
-				manifest = Gold.manifest(Io.json!(manifest_path)?).map_err(|m| Failed("${manifest_path}: ${m}"))?
-				files = Evaluate.fetch!(manifest)?
-				pick = |key| match files.keep_if(|(n, _)| n == ((g.field(key) ?? JsonValue.str("")).as_str() ?? "")) {
-					[(_, p), ..] => p
-					[] => ""
-				}
-				Ok({ input: pick("input"), reference: pick("reference") })
-			}
-			Err(_) => Err(NoGold)
+	## The prompt templates: each file in the prompts folder that exists, else the built-in one.
+	prompts! : Str, Str, Prompts => Try(Prompts, [Failed(Str)])
+	prompts! = |folder, configured, defaults| {
+		if configured == "" {
+			return Ok(defaults)
 		}
-		raw = Dataset.spec(
-			match from_gold {
-				Ok(g) => json.set("input", JsonValue.str(g.input))
-				Err(_) => json
-			},
-		).map_err(|m| Failed("${path}: ${m}"))?
-		spec = match from_gold {
-			Ok(g) => { ..raw, input: g.input, reference: g.reference }
-			Err(_) => { ..raw, input: Io.join(dir, raw.input), reference: if (raw.reference == "") "" else Io.join(dir, raw.reference) }
+		if !Io.exists!(folder) {
+			return Err(Failed("prompts_dir ${folder} does not exist"))
 		}
-		input = Io.read!(spec.input)?
-		sentences = match spec.format {
-			Conllu => Conllu.parse(input).map_err(|e| Failed("${spec.input}:${e.line.to_str()}: ${e.message}"))?
-			Tokens => Dataset.from_tokens(Dataset.slice(spec, input))
+		one! = |name, default| if (Io.exists!("${folder}/${name}.md")) Io.read!("${folder}/${name}.md") else Ok(default)
+		Ok({ translate: one!("translate", defaults.translate)?, gloss: one!("gloss", defaults.gloss)?, passage: one!("passage", defaults.passage)? })
+	}
+
+	## A work: `<name>.conllu`, with an optional `<name>.context.md` (a first line `# <Title>` sets the title) and an
+	## optional `<name>.refs.tsv` (token<TAB>citation lines) for passage translations.
+	work! : Str, Str, Str => Try({ value : Work, context : Str }, [Failed(Str)])
+	work! = |folder, name, separator| {
+		conllu_path = "${folder}/${name}.conllu"
+		sentences = Conllu.parse(Io.read!(conllu_path)?).map_err(|e| Failed("${conllu_path}:${e.line.to_str()}: ${e.message}"))?
+		if sentences.is_empty() {
+			return Err(Failed("${conllu_path} has no sentences"))
 		}
-		passages = match spec.passages {
-			BySentence => Dataset.by_sentence(spec, sentences)
-			Refs(file) => Dataset.from_refs(spec, Io.read!(Io.join(dir, file))?, sentences).map_err(|m| Failed("${file}: ${m}"))?
-			File(file) => Dataset.from_file(Io.json!(Io.join(dir, file))?).map_err(|m| Failed("${file}: ${m}"))?
+		context_path = "${folder}/${name}.context.md"
+		raw = if (Io.exists!(context_path)) Io.read!(context_path)? else ""
+		titled = match raw.trim().split_first("\n") {
+			Ok({ before, after }) if before.starts_with("# ") => { title: before.drop_prefix("# ").trim(), context: after.trim() }
+			_ => if (raw.trim().starts_with("# ")) { title: raw.trim().drop_prefix("# ").trim(), context: "" } else { title: name, context: raw.trim() }
 		}
-		reference = if (spec.reference == "") [] else Dataset.from_tokens(Dataset.slice(spec, Io.read!(spec.reference)?)).map(|s| s.rows.map(|r| r.form))
-		Ok({ spec, sentences, passages, reference })
+		spec = { ..Dataset.detect(titled.title, sentences), label_separator: separator }
+		refs_path = "${folder}/${name}.refs.tsv"
+		has_refs = Io.exists!(refs_path)
+		passages = if (has_refs) Dataset.from_refs(spec, Io.read!(refs_path)?, sentences).map_err(|m| Failed("${refs_path}: ${m}"))? else []
+		Ok({ value: { name, spec, sentences, passages, has_refs }, context: titled.context })
 	}
 }

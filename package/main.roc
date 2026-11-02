@@ -1,15 +1,13 @@
-## apo: derive annotated text from source corpora with language models, and measure it.
+## apo: gloss and translate Ancient Greek CoNLL-U with language models.
 ## This package is pure; the apo command line (cli/) performs its effects.
 package
 	[
+		Config,
 		Conllu,
 		Dataset,
-		Gold,
 		JsonValue,
-		Metrics,
 		Provider,
 		Steps,
 		Template,
-		Validate,
 	]
 	{}

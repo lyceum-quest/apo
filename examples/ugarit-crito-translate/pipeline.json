@@ -1,6 +1,0 @@
-{
-  "steps": [
-    { "kind": "translate-sentence", "prompt": "prompts/translate.md", "max_tokens": 1024 }
-  ],
-  "limits": { "attempts": 2, "timeout_seconds": 300, "on_failure": "skip" }
-}

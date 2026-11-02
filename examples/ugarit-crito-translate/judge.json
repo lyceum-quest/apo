@@ -1,7 +1,0 @@
-{
-  "providers": "providers.json",
-  "model": { "name": "judge-sonnet", "provider": "claude-cli", "id": "sonnet" },
-  "prompt": "prompts/judge.md",
-  "max_tokens": 400,
-  "attempts": 2
-}

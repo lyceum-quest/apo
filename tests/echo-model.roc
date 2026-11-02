@@ -1,6 +1,6 @@
 # A deterministic stand-in model for whole-run tests, run through the `command` protocol: it answers each step kind
-# with a well-formed reply built from the request (glosses `gloss-<form>`, translations naming the token count,
-# alignment links pairing equal positions). Setting `options.flaw` to `copy` makes its first gloss copy the form.
+# with a well-formed reply built from the request (glosses `gloss-<form>`, translations naming the token count).
+# Setting `options.flaw` to `copy` makes its first gloss copy the form.
 app [main!] {
 	apo: "../package/main.roc",
 	pf: platform "https://github.com/roc-lang/basic-cli/releases/download/0.26.0/GddgvsGjiNXrHFW6au5i5dUDbTs8FinQdrgE2Gqmw53t.tar.zst",
@@ -24,19 +24,9 @@ main! = |_args| {
 			$glosses = $glosses.append(JsonValue.object([("id", t.field("id") ?? JsonValue.null), ("gloss", JsonValue.str(gloss))]))
 		}
 		JsonValue.object([("glosses", JsonValue.list($glosses))])
-	} else if user.field("source_tokens").is_ok() {
-		source_count = (user.field("source_tokens") ?? JsonValue.list([])).items().len()
-		target_count = (user.field("target_tokens") ?? JsonValue.list([])).items().len()
-		var $links = []
-		var $i = 0
-		while $i < source_count and $i < target_count {
-			$links = $links.append(JsonValue.list([JsonValue.u64($i), JsonValue.u64($i)]))
-			$i = $i + 1
-		}
-		JsonValue.object([("links", JsonValue.list($links))])
 	} else {
 		n = tokens.len().to_str()
-		JsonValue.object([("prose_translation", JsonValue.str("A sentence of ${n} words.")), ("literal_translation", JsonValue.str("a sentence of ${n} words"))])
+		JsonValue.object([("prose_translation", JsonValue.str("A sentence of ${n} words."))])
 	}
 	Stdout.line!(JsonValue.encode(JsonValue.object([("content", JsonValue.str("```json\n${JsonValue.encode(content)}\n```")), ("input_tokens", JsonValue.u64(text.to_utf8().len() // 4)), ("output_tokens", JsonValue.u64(10)), ("cost", JsonValue.Number("0.001"))])))
 }
