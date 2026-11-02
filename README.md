@@ -30,9 +30,12 @@ offers, and takes options outside a terminal (`apo init --help`).
 
 ### Providers
 
-- **Hosted APIs:** Anthropic, OpenAI, OpenRouter, Google, Groq and about 200 more, by API key.
+- **Hosted APIs:** Anthropic, OpenAI, OpenRouter, PPQ, Google, Groq and about 200 more, by API key.
 - **Local models:** Ollama, llama.cpp, LM Studio, vLLM, or any OpenAI-compatible server by URL, on your machine or a
   cluster: `apo init --base-url http://gpu-node:8000/v1 --model <id>`. Start the server first; apo lists its models.
+  apo rejects replies that are not the JSON it asked for, so a small model may fail every sentence. If a model wraps
+  its JSON in prose, add `"options": { "response_format": { "type": "json_object" } }` to it in `config.json` (tested
+  with Ollama; support varies by server).
 - **Your Claude Code login:** `claude -p`, through the unmodified Claude Code. Anthropic does not allow other tools to
   sign in with a Claude subscription, so apo has no such login; use an API key for large runs.
 
