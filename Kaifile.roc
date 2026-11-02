@@ -1,6 +1,6 @@
 app [kaifile] {
-	pf: platform "https://github.com/thebrandonlucas/kai/releases/download/v0.0.9/EenHNXeRqmvf2kHJLLbjroXeLwbQxyH5fbVQVgD3DXg4.tar.zst",
-	std: "https://github.com/thebrandonlucas/kai/releases/download/v0.0.9/std-DiShoF1FRWjQe7BmRnSTmqG44WgHUGuMMTMgBoaBqemq.tar.zst",
+	pf: platform "https://github.com/thebrandonlucas/kai/releases/download/v0.0.10/9jXNkEdEWZ3cyQqHMLyTenLr4Xj5nEJT48UwnU8AxPCp.tar.zst",
+	std: "https://github.com/thebrandonlucas/kai/releases/download/v0.0.10/std-CJKhhQ3UzajxpUqUKcpv2cwHGJpXQ8qPRiHKL5prqK2y.tar.zst",
 }
 
 import std.Std
@@ -26,7 +26,9 @@ kaifile = Std.kaifile([
 	Task("build", [Use("dev"), Run(["roc", "build", "cli/main.roc", "--output=apo"])]),
 
 	# The package's expects: every module's checks, without models or network.
-	Task("test", [Use("dev"), Run(["roc", "test", "package/main.roc"])]),
+	# --no-cache works around Roc returning wrong results after `kai run build` compiled the same modules. Remove it when
+	# https://github.com/thebrandonlucas/roc-issues/tree/master/bugs/BUG-020-test-after-build-wrong-constant passes.
+	Task("test", [Use("dev"), Run(["roc", "test", "package/main.roc", "--no-cache"])]),
 
 	# Builds the deterministic stand-in model the end-to-end tests run through the command protocol.
 	Task("build-echo-model", [Use("dev"), Run(["roc", "build", "tests/echo-model.roc", "--output=tests/echo-model"])]),
