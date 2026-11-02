@@ -20,7 +20,7 @@ Config :: [].{
 		known(json, "the configuration", ["providers", "models", "works_dir", "output_dir", "prompts_dir", "limits", "author", "works"])?
 		var $providers = []
 		for (name, p) in object(json, "providers")? {
-			known(p, "provider ${name}", ["protocol", "base_url", "key_env", "headers", "command"])?
+			known(p, "provider ${name}", ["protocol", "base_url", "key_env", "max_tokens_key", "headers", "command"])?
 			$providers = $providers.append(Provider.settings(name, p)?)
 		}
 		var $models = []

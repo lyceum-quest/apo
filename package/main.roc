@@ -2,10 +2,12 @@
 ## This package is pure; the apo command line (cli/) performs its effects.
 package
 	[
+		Catalog,
 		Config,
 		Conllu,
 		Dataset,
 		JsonValue,
+		Picker,
 		Provider,
 		Steps,
 		Template,

@@ -2,14 +2,15 @@ import JsonValue
 
 ## Providers and models. A protocol is code (how to send a call and read the reply); an endpoint is configuration.
 ##   openai-chat: POST <base_url>/chat/completions. OpenRouter, PPQ, vLLM, llama.cpp, Ollama and others.
+##   anthropic-messages: POST <base_url>/v1/messages, with the system prompt cached between calls.
 ##   claude-cli:  `claude -p` on the local Claude Code login.
 ##   command:     any program: the call as JSON on stdin, `{ "content", "input_tokens", "output_tokens" }` on stdout
 ##                (only `content` is required).
-## API keys are read from the environment variable a provider names, and never stored.
+## API keys come from `apo login` (see cli/Auth.roc) or the environment variable a provider names; config.json holds none.
 Provider :: [].{
-	Protocol : [OpenAiChat, ClaudeCli, Command(List(Str))]
+	Protocol : [OpenAiChat, AnthropicMessages, ClaudeCli, Command(List(Str))]
 
-	Settings : { name : Str, protocol : Protocol, base_url : Str, key_env : Str, headers : List((Str, Str)) }
+	Settings : { name : Str, protocol : Protocol, base_url : Str, key_env : Str, max_tokens_key : Str, headers : List((Str, Str)) }
 
 	Model : { name : Str, provider : Settings, id : Str, options : JsonValue }
 
@@ -25,16 +26,19 @@ Provider :: [].{
 	protocol_name : Protocol -> Str
 	protocol_name = |p| match p {
 		OpenAiChat => "openai-chat"
+		AnthropicMessages => "anthropic-messages"
 		ClaudeCli => "claude-cli"
 		Command(_) => "command"
 	}
 
-	## A provider from its config entry: `{ "protocol", "base_url", "key_env", "headers", "command" }`.
+	## A provider from its config entry: `{ "protocol", "base_url", "key_env", "max_tokens_key", "headers", "command" }`.
+	## `max_tokens_key` names the limit in the request body where an API differs (OpenAI: `max_completion_tokens`).
 	settings : Str, JsonValue -> Try(Settings, Str)
 	settings = |name, p| {
 		text = |key| (p.field(key) ?? JsonValue.str("")).as_str() ?? ""
 		protocol = match text("protocol") {
 			"openai-chat" => OpenAiChat
+			"anthropic-messages" => AnthropicMessages
 			"claude-cli" => ClaudeCli
 			"command" => {
 				argv = (p.field("command") ?? JsonValue.list([])).items().map(|a| a.as_str() ?? "")
@@ -43,13 +47,14 @@ Provider :: [].{
 				}
 				Command(argv)
 			}
-			other => return Err("provider ${name}: unknown protocol \"${other}\"; expected openai-chat, claude-cli or command")
+			other => return Err("provider ${name}: unknown protocol \"${other}\"; expected openai-chat, anthropic-messages, claude-cli or command")
 		}
 		if protocol == OpenAiChat and text("base_url") == "" {
 			return Err("provider ${name}: openai-chat needs base_url")
 		}
 		headers = (p.field("headers") ?? JsonValue.object([])).fields().map(|(k, v)| (k, v.as_str() ?? ""))
-		Ok({ name, protocol, base_url: text("base_url").drop_suffix("/"), key_env: text("key_env"), headers })
+		base_url = if (protocol == AnthropicMessages and text("base_url") == "") "https://api.anthropic.com" else text("base_url").drop_suffix("/")
+		Ok({ name, protocol, base_url, key_env: text("key_env"), max_tokens_key: text("max_tokens_key"), headers })
 	}
 
 	## What determines a reply: hashed for the reply cache. The key and the endpoint's credentials are not part of it.
@@ -68,16 +73,30 @@ Provider :: [].{
 	outbound : Model, Call, Str -> Outbound
 	outbound = |m, c, key| match m.provider.protocol {
 		OpenAiChat => {
+			limit_key = if (m.provider.max_tokens_key == "") "max_tokens" else m.provider.max_tokens_key
 			body = JsonValue.merge(
 				JsonValue.object([
 					("model", JsonValue.str(m.id)),
-					("max_tokens", JsonValue.u64(c.max_tokens)),
+					(limit_key, JsonValue.u64(c.max_tokens)),
 					("messages", JsonValue.list([message("system", c.system), message("user", c.user)])),
 				]),
 				m.options,
 			)
 			auth = if (key == "") [] else [("Authorization", "Bearer ${key}")]
 			Http({ url: "${m.provider.base_url}/chat/completions", headers: auth.concat(m.provider.headers).append(("Content-Type", "application/json")), body: JsonValue.encode(body) })
+		}
+		AnthropicMessages => {
+			system = JsonValue.list([JsonValue.object([("type", JsonValue.str("text")), ("text", JsonValue.str(c.system)), ("cache_control", JsonValue.object([("type", JsonValue.str("ephemeral"))]))])])
+			body = JsonValue.merge(
+				JsonValue.object([
+					("model", JsonValue.str(m.id)),
+					("max_tokens", JsonValue.u64(c.max_tokens)),
+					("system", system),
+					("messages", JsonValue.list([message("user", c.user)])),
+				]),
+				m.options,
+			)
+			Http({ url: "${m.provider.base_url}/v1/messages", headers: anthropic_headers(key).concat(m.provider.headers).append(("Content-Type", "application/json")), body: JsonValue.encode(body) })
 		}
 		ClaudeCli => Exec({
 			argv: ["claude", "-p", "--model", m.id, "--system-prompt", c.system, "--output-format", "json", "--tools", "", "--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence", "--setting-sources", "", c.user],
@@ -86,6 +105,25 @@ Provider :: [].{
 			stdin: "",
 		})
 		Command(argv) => Exec({ argv, env: [], cwd: "", stdin: JsonValue.encode(JsonValue.object([("model", JsonValue.str(m.id)), ("options", m.options), ("system", JsonValue.str(c.system)), ("user", JsonValue.str(c.user)), ("max_tokens", JsonValue.u64(c.max_tokens))])) })
+	}
+
+	anthropic_headers : Str -> List((Str, Str))
+	anthropic_headers = |key| [("x-api-key", key), ("anthropic-version", "2023-06-01")]
+
+	## Where a provider lists its models, and the headers to ask with: `{ data: [{ id }] }` from every API apo speaks,
+	## hosted or local. Providers without one (`claude-cli`, `command`) have none.
+	models_request : Settings, Str -> Try({ url : Str, headers : List((Str, Str)) }, [NoListing])
+	models_request = |p, key| match p.protocol {
+		OpenAiChat => Ok({ url: "${p.base_url}/models", headers: (if (key == "") [] else [("Authorization", "Bearer ${key}")]).concat(p.headers) })
+		AnthropicMessages => Ok({ url: "${p.base_url}/v1/models?limit=1000", headers: anthropic_headers(key).concat(p.headers) })
+		ClaudeCli | Command(_) => Err(NoListing)
+	}
+
+	## The model IDs in a listing, sorted.
+	model_ids : Str -> Try(List(Str), Str)
+	model_ids = |body| {
+		json = JsonValue.decode(body.trim()).map_err(|e| "the model list is not JSON: ${e}")?
+		Ok((json.field("data") ?? JsonValue.null).items().keep_oks(|m| (m.field("id") ?? JsonValue.null).as_str()).sort_with(JsonValue.compare))
 	}
 
 	message : Str, Str -> JsonValue
@@ -108,6 +146,15 @@ Provider :: [].{
 				usage = json.field("usage") ?? JsonValue.object([])
 				Ok({ content, input_tokens: count(usage, "prompt_tokens"), output_tokens: count(usage, "completion_tokens") })
 			}
+			AnthropicMessages => {
+				if json.field("error").is_ok() {
+					return Err("the provider returned an error: ${JsonValue.encode(json.field("error") ?? JsonValue.null)}")
+				}
+				texts = (json.field("content") ?? JsonValue.null).items().keep_if(|b| (b.field("type") ?? JsonValue.null).as_str() == Ok("text"))
+				content = Str.join_with(texts.map(|b| (b.field("text") ?? JsonValue.null).as_str() ?? ""), "")
+				usage = json.field("usage") ?? JsonValue.object([])
+				Ok({ content, input_tokens: count(usage, "input_tokens") + count(usage, "cache_creation_input_tokens") + count(usage, "cache_read_input_tokens"), output_tokens: count(usage, "output_tokens") })
+			}
 			ClaudeCli => {
 				if (json.field("is_error") ?? JsonValue.bool(Bool.False)).as_bool() == Ok(Bool.True) {
 					return Err("claude reported an error: ${(json.field("result") ?? JsonValue.null).as_str() ?? ""}")
@@ -124,7 +171,7 @@ Provider :: [].{
 	}
 }
 
-local = { name: "local", provider: { name: "local", protocol: OpenAiChat, base_url: "http://127.0.0.1:8080/v1", key_env: "", headers: [] }, id: "qwen", options: JsonValue.object([("temperature", JsonValue.Number("0"))]) }
+local = { name: "local", provider: { name: "local", protocol: OpenAiChat, base_url: "http://127.0.0.1:8080/v1", key_env: "", max_tokens_key: "", headers: [] }, id: "qwen", options: JsonValue.object([("temperature", JsonValue.Number("0"))]) }
 
 expect match Provider.outbound(local, { system: "S", user: "U", max_tokens: 10 }, "") {
 	Http(h) => h.url == "http://127.0.0.1:8080/v1/chat/completions" and h.body == "{\"model\":\"qwen\",\"max_tokens\":10,\"messages\":[{\"role\":\"system\",\"content\":\"S\"},{\"role\":\"user\",\"content\":\"U\"}],\"temperature\":0}" and h.headers == [("Content-Type", "application/json")]
@@ -142,3 +189,24 @@ expect Provider.settings("x", JsonValue.decode("{\"protocol\": \"openai-chat\"}"
 
 # The cache key must not change: replies stored by earlier versions stay valid.
 expect JsonValue.canonical(Provider.identity(local, { system: "S", user: "U", max_tokens: 1 })) == "{\"base_url\":\"http://127.0.0.1:8080/v1\",\"max_tokens\":1,\"model\":\"qwen\",\"options\":{\"temperature\":0},\"protocol\":\"openai-chat\",\"system\":\"S\",\"user\":\"U\"}"
+
+expect Provider.model_ids("{\"object\": \"list\", \"data\": [{\"id\": \"b\"}, {\"id\": \"a\"}]}") == Ok(["a", "b"])
+
+expect Provider.models_request(local.provider, "k").map_ok(|r| r.url) == Ok("http://127.0.0.1:8080/v1/models")
+
+expect match Provider.outbound({ ..local, provider: { ..local.provider, max_tokens_key: "max_completion_tokens" } }, { system: "S", user: "U", max_tokens: 10 }, "") {
+	Http(h) => h.body.contains("\"max_completion_tokens\":10") and !h.body.contains("\"max_tokens\"")
+	Exec(_) => Bool.False
+}
+
+anthropic = { ..local, provider: { ..local.provider, protocol: AnthropicMessages, base_url: "https://api.anthropic.com" } }
+
+expect match Provider.outbound(anthropic, { system: "S", user: "U", max_tokens: 10 }, "k") {
+	Http(h) => h.url == "https://api.anthropic.com/v1/messages" and h.headers.contains(("x-api-key", "k")) and h.body.contains("\"max_tokens\":10")
+	Exec(_) => Bool.False
+}
+
+expect match Provider.reply(anthropic, "{\"content\":[{\"type\":\"text\",\"text\":\"{}\"}],\"usage\":{\"input_tokens\":7,\"output_tokens\":3}}") {
+	Ok(r) => r.content == "{}" and r.input_tokens == 7 and r.output_tokens == 3
+	Err(_) => Bool.False
+}

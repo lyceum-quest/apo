@@ -15,6 +15,7 @@ import apo.JsonValue
 import apo.Provider
 import apo.Steps
 
+import Auth
 import Io
 import Load
 
@@ -38,9 +39,9 @@ Execute :: [].{
 		if !fresh {
 			unchanged!(dir, fingerprint)?
 		}
-		ctx = { job, dir, cache: cache!(dir)?, key: Io.key!(job.model) }
+		ctx = { job, dir, cache: cache!(dir)?, key: Auth.key!(job.model.provider)? }
 		if job.model.provider.key_env != "" and ctx.key == "" {
-			return Err(Failed("set ${job.model.provider.key_env} for provider ${job.model.provider.name}"))
+			return Err(Failed("provider ${job.model.provider.name} has no key: run `apo login ${job.model.provider.name}` or set ${job.model.provider.key_env}"))
 		}
 		spec = job.work.spec
 		sentences = job.work.sentences
@@ -194,6 +195,27 @@ Execute :: [].{
 			Io.write!("${dir}/units.jsonl", Str.join_with(units.map(|u| "${JsonValue.canonical(u)}\n"), ""))?
 		}
 		Ok({})
+	}
+
+	## The models a provider offers, asked of the provider itself. `NoListing` when it has no such endpoint.
+	models! : Provider.Settings, Str => Try(List(Str), [NoListing, Unreachable(Str)])
+	models! = |provider, key| {
+		listing = Provider.models_request(provider, key)?
+		var $request = Request.from_method(GET).with_uri(listing.url).with_timeout(TimeoutMilliseconds(20000))
+		for (name, value) in listing.headers {
+			$request = $request.add_header(name, value)
+		}
+		match Http.send!($request, {}) {
+			Ok(response) => {
+				body = Str.from_utf8(response.body()) ?? ""
+				if response.status() >= 200 and response.status() < 300 {
+					Provider.model_ids(body).map_err(|m| Unreachable(m))
+				} else {
+					Err(Unreachable("${listing.url}: HTTP ${response.status().to_str()}"))
+				}
+			}
+			Err(e) => Err(Unreachable("${listing.url}: ${Str.inspect(e)}"))
+		}
 	}
 
 	## The response body of a call, or why there is none.
