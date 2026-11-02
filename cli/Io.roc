@@ -6,7 +6,6 @@ import pf.Path
 import pf.Utc
 
 import apo.JsonValue
-import apo.Provider
 
 Io :: [].{
 	read! : Str => Try(Str, [Failed(Str)])
@@ -74,10 +73,6 @@ Io :: [].{
 	## An environment variable's value, or "" when it is unset.
 	env! : Str => Str
 	env! = |name| Env.var_str!(OsStr.from_str(name)) ?? ""
-
-	## The API key a model's provider names, or "" when it names none or the variable is unset.
-	key! : Provider.Model => Str
-	key! = |model| if (model.provider.key_env == "") "" else Env.var_str!(OsStr.from_str(model.provider.key_env)) ?? ""
 
 	## Whether standard input is a terminal (the probe inherits it; a captured child would see a pipe).
 	stdin_is_terminal! : () => Bool

@@ -25,9 +25,25 @@ apo run --count 5              # the next 5 sentences of every work, with every 
 apo run --work luke --model sonnet --count 20
 ```
 
-`init` asks in a terminal and takes options otherwise (`apo init --help`). Providers are your Claude Code login
-(`claude -p`) or any OpenAI-compatible API: OpenRouter, or a local llama.cpp, vLLM or Ollama server. API keys are read
-from the environment variable the configuration names.
+`init` shows a list of providers (type to filter, arrows to move, Enter to choose) and then the models that provider
+offers, and takes options outside a terminal (`apo init --help`).
+
+### Providers
+
+- **Hosted APIs:** Anthropic, OpenAI, OpenRouter, Google, Groq and about 200 more, by API key.
+- **Local models:** Ollama, llama.cpp, LM Studio, vLLM, or any OpenAI-compatible server by URL, on your machine or a
+  cluster: `apo init --base-url http://gpu-node:8000/v1 --model <id>`. Start the server first; apo lists its models.
+- **Your Claude Code login:** `claude -p`, through the unmodified Claude Code. Anthropic does not allow other tools to
+  sign in with a Claude subscription, so apo has no such login; use an API key for large runs.
+
+```sh
+apo login openrouter     # stores the key, hidden as you type or read from standard input
+apo logout openrouter
+```
+
+Keys are kept in `~/.local/share/apo/auth.json`, readable only by you, never in `config.json`, so a configuration can
+be shared. A stored key is used before the provider's environment variable (`OPENROUTER_API_KEY`), which also works
+alone.
 
 ### Works
 
@@ -36,6 +52,13 @@ works/
   luke.conllu         one work per CoNLL-U file
   luke.context.md     optional: guidance for this work; a first line "# <Title>" sets its title
   luke.refs.tsv       optional: "token<TAB>citation" lines, for passage translations
+```
+
+To use Opera Graeca Adnotata, link the texts you want; a folder of all 1,999 would run on every one:
+
+```sh
+mkdir works
+ln -s /path/to/OGA/workspace/conllu/tlg0031.tlg003.perseus-grc2.tok01_sentence-seg01_annotated_lemma.conllu works/luke.conllu
 ```
 
 OGA's conventions are recognized: its token IDs (`t_N`, the first MISC item) and its rows for elided words (`e_…`),
@@ -58,3 +81,7 @@ stops rather than mix the two; `--fresh` starts that work over.
 ## Status
 
 Version 0.1.0, not yet released.
+
+## Credits
+
+`providers.json` is drawn from [models.dev](https://models.dev) (MIT License, Copyright (c) 2025 models.dev).

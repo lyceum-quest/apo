@@ -59,7 +59,7 @@ Paths are relative to its folder (`init` writes absolute ones).
 
 - Protocols: `openai-chat` (OpenRouter, PPQ, vLLM, llama.cpp, Ollama), `claude-cli` (`claude -p` on the local Claude
   Code login), and `command` (any program: the call as JSON on stdin, `{ "content" }` on stdout; the tests' stand-in
-  model uses it). Keys are read only from the environment variable `key_env` names.
+  model uses it). Keys come from `apo login` (`auth.json`, owner-only) or the environment variable `key_env` names, never `config.json`.
 - `options` on a model are merged into each request (e.g. `temperature`).
 - `prompts_dir` overrides the built-in prompts (`prompts/translate.md`, `gloss.md`, `passage.md`) file by file.
   Templates may use `{{title}}` and `{{context}}`.
