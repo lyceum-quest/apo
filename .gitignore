@@ -1,9 +1,8 @@
 /apo
-/runs/
 /.kai/*
 !/.kai/lock.json
-/gold/cache/
-/tests/**/runs/
+/tests/**/apo-output/
 /tests/echo-model
 /apo.new
-/examples/*/runs/
+/apo-output/
+/works/

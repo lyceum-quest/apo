@@ -1,49 +1,52 @@
-# apo: run language models over CoNLL-U, validate the output, and measure it.
+# apo: gloss and translate Ancient Greek CoNLL-U with language models.
 app [main!] {
 	apo: "../package/main.roc",
 	http: "https://github.com/roc-lang/http/releases/download/1.0.0/6ZUwqYhCS8PU9Mo6MF7oV82ET2o7KYb57CLKDq4cq4sS.tar.zst",
 	pf: platform "https://github.com/roc-lang/basic-cli/releases/download/0.26.0/GddgvsGjiNXrHFW6au5i5dUDbTs8FinQdrgE2Gqmw53t.tar.zst",
 }
 
+import pf.Env
 import pf.OsStr
 import pf.Path
 import pf.Stderr
+import pf.Stdin
 import pf.Stdout
-import apo.Gold
+import apo.Catalog
 import apo.JsonValue
-import apo.Validate
+import apo.Picker
+import apo.Provider
 
-import Archive
-import Compare
-import Evaluate
+import Auth
 import Execute
 import Io
 import Load
+import Prompt
 
 import "../VERSION" as raw_version : Str
+import "../providers.json" as raw_providers : Str
+import "../prompts/translate.md" as translate_prompt : Str
+import "../prompts/gloss.md" as gloss_prompt : Str
+import "../prompts/passage.md" as passage_prompt : Str
 
 version = raw_version.trim()
+
+defaults = { translate: translate_prompt, gloss: gloss_prompt, passage: passage_prompt }
 
 usage =
 	\\usage: apo <command> [options]
 	\\
 	\\commands:
-	\\  validate <file.conllu>... [--profile <profile.json>] [--json]   check CoNLL-U files
-	\\  plan <experiment.json> [--only <label>]                        the calls a run would make, and their cost
-	\\  run <experiment.json> [--paid] [--only <label>]                run an experiment; resumes from its store
-	\\  gold fetch <gold.json>                                         download and check a gold set
-	\\  eval <run-dir>... --gold <gold.json> [--json]                  score runs against a gold set
-	\\  compare <run-dir>... --judge <judge.json> --out <dir>          rank runs by pairwise preference (see --help)
-	\\  export <run-dir> <work-dir>                                    write a run as an archive work folder
-	\\  adopt <work-dir> [--runs <dir>]                                wrap a pre-apo work folder as a run
-	\\  seed <experiment.json> --from <work-dir> [--only <label>]     fill a run's store from a pre-apo work folder
+	\\  init    write a configuration: provider, models, works and output folders
+	\\  login   store a provider's API key
+	\\  logout  remove a stored API key
+	\\  run     gloss and translate the next sentences of every work with every model
 	\\
 	\\Run `apo <command> --help` for a command's options.
 
 main! : List(OsStr) => Try({}, [Exit(I32)])
 main! = |args| {
 	shown = args.map(OsStr.display)
-	match run!(shown) {
+	match command!(shown) {
 		Ok({}) => Ok({})
 		Err(Usage(message)) => {
 			_ = Stderr.line!(message)
@@ -53,7 +56,6 @@ main! = |args| {
 			_ = Stderr.line!("apo: ${message}")
 			Err(Exit(1))
 		}
-		Err(Invalid) => Err(Exit(1))
 		Err(other) => {
 			_ = Stderr.line!("apo: ${Str.inspect(other)}")
 			Err(Exit(1))
@@ -61,24 +63,20 @@ main! = |args| {
 	}
 }
 
-run! = |shown| match shown {
-	["validate", .. as rest] => validate!(rest)
-	["plan", .. as rest] => plan!(rest)
-	["run", .. as rest] => run_experiment!(rest)
-	["gold", .. as rest] => gold!(rest)
-	["eval", .. as rest] => eval!(rest)
-	["compare", .. as rest] => compare!(rest)
-	["export", .. as rest] => export!(rest)
-	["adopt", .. as rest] => adopt!(rest)
-	["seed", .. as rest] => seed!(rest)
+command! = |shown| match shown {
+	["init", .. as rest] => init!(rest)
+	["login", .. as rest] => login!(rest)
+	["logout", .. as rest] => logout!(rest)
+	["run", .. as rest] => run!(rest)
 	["--version"] => Stdout.line!(version)
 	["--help"] | ["-h"] | ["help"] | [] => Stdout.line!(usage)
-	[command, ..] => Err(Usage("apo: unknown command ${command}\n\n${usage}"))
+	[name, ..] => Err(Usage("apo: unknown command ${name}\n\n${usage}"))
 }
 
-## Options as (`--name`, value) pairs and the remaining positional arguments; `flags` take no value.
-options : List(Str), List(Str) -> Try({ named : List((Str, Str)), positional : List(Str) }, [Usage(Str)])
-options = |words, flags| {
+## Options as (`--name`, value) pairs and the remaining positional arguments. `flags` take no value; `valued` take one;
+## any other option is an error.
+options : List(Str), List(Str), List(Str), Str -> Try({ named : List((Str, Str)), positional : List(Str) }, [Usage(Str)])
+options = |words, flags, valued, help| {
 	var $named = []
 	var $positional = []
 	var $pending = Err(None)
@@ -91,8 +89,10 @@ options = |words, flags| {
 			Err(_) => if word.starts_with("--") {
 				if flags.contains(word) {
 					$named = $named.append((word, ""))
-				} else {
+				} else if valued.contains(word) {
 					$pending = Ok(word)
+				} else {
+					return Err(Usage("apo: unknown option ${word}\n\n${help}"))
 				}
 			} else {
 				$positional = $positional.append(word)
@@ -105,176 +105,236 @@ options = |words, flags| {
 	}
 }
 
-option : { named : List((Str, Str)), positional : List(Str) }, Str -> Try(Str, [Missing])
-option = |parsed, name| match parsed.named.keep_if(|(n, _)| n == name) {
-	[(_, v), ..] => Ok(v)
-	[] => Err(Missing)
-}
+## Every value given for an option.
+values = |parsed, name| parsed.named.keep_if(|(n, _)| n == name).map(|(_, v)| v)
+
+option = |parsed, name| values(parsed, name).first() ?? ""
 
 has_flag = |parsed, name| parsed.named.any(|(n, _)| n == name)
 
-read! = |path| Path.read_utf8!(Path.unix(path)).map_err(|_| Failed("cannot read ${path}"))
+## Rejects positional arguments, which no command takes.
+no_arguments = |parsed, help| if (parsed.positional.is_empty()) Ok({}) else Err(Usage("apo: unexpected argument ${parsed.positional.first() ?? ""}\n\n${help}"))
 
-json_file! = |path| JsonValue.decode(read!(path)?).map_err(|message| Failed("${path}: ${message}"))
+run_help =
+	\\usage: apo run [--count N] [--work <name>]... [--model <name>]... [--fresh] [--config <config.json>]
+	\\
+	\\Translates and glosses the next N sentences (default 10) of every work with every model, in order, then
+	\\translates each citation passage those sentences complete. Sentences already done are not called again: every
+	\\accepted reply is kept in the output folder's replies.jsonl. Outputs go to <output_dir>/<work>/<model>/.
+	\\
+	\\A run stops if a work's output was made with a different model, prompt, context or limit; --fresh starts that
+	\\work over instead.
 
-validate! = |words| {
-	parsed = options(words, ["--json", "--help"])?
-	if has_flag(parsed, "--help") or parsed.positional.is_empty() {
-		return Stdout.line!("usage: apo validate [--profile <profile.json>] [--json] <file.conllu>...\n\nChecks CoNLL-U format, and a profile's rules if given. Exits 1 if any file has problems.")
+run! = |words| {
+	parsed = options(words, ["--fresh", "--help"], ["--count", "--work", "--model", "--config"], run_help)?
+	if has_flag(parsed, "--help") {
+		return Stdout.line!(run_help)
 	}
-	rules = match option(parsed, "--profile") {
-		Ok(path) => Validate.profile(json_file!(path)?).map_err(|message| Failed("${path}: ${message}"))?
-		Err(_) => Validate.no_profile
-	}
-	var $total = 0
-	for file in parsed.positional {
-		problems = Validate.check(read!(file)?, rules)
-		for p in problems {
-			_ = if has_flag(parsed, "--json") {
-				Stdout.line!(JsonValue.encode(JsonValue.object([("file", JsonValue.str(file)), ("line", JsonValue.u64(p.line)), ("code", JsonValue.str(p.code)), ("message", JsonValue.str(p.message))])))
-			} else {
-				Stdout.line!("${file}:${p.line.to_str()}: ${p.code}: ${p.message}")
-			}
+	no_arguments(parsed, run_help)?
+	count = match option(parsed, "--count") {
+		"" => 10
+		text => match U64.from_str(text) {
+			Ok(n) if n > 0 => n
+			_ => return Err(Usage("apo: --count must be a positive whole number"))
 		}
-		$total = $total + problems.len()
 	}
-	if $total == 0 {
-		Stderr.line!("${parsed.positional.len().to_str()} file(s) valid${if (rules.name == "") "" else " under ${rules.name}"}").map_err(|_| Invalid)
+	path = Load.config_path!(option(parsed, "--config"))
+	for job in Load.jobs!(path, defaults, values(parsed, "--work"), values(parsed, "--model"))? {
+		report = Execute.run!(job, count, has_flag(parsed, "--fresh"), version)?
+		passages = if (job.work.has_refs) ", ${report.passages.to_str()} of ${report.total_passages.to_str()} passages" else ""
+		Stdout.line!("${job.work.name}/${job.model.name}: ${report.generated.to_str()} new; ${report.sentences.to_str()} of ${report.total.to_str()} sentences${passages}; ${report.dir}")?
+	}
+	Ok({})
+}
+
+init_help =
+	\\usage: apo init [--provider <id> | --claude-cli | --base-url <url> [--key-env <VAR>]] [--model <id>]...
+	\\                [--works <dir>] [--output <dir>] [--name <name>] [--email <email>] [--config <config.json>] [--force]
+	\\
+	\\Writes the configuration apo run reads ($XDG_CONFIG_HOME/apo/config.json, else ~/.config/apo/config.json).
+	\\In a terminal it asks for anything not given: pick a provider from a list (type to filter), paste its key if
+	\\it needs one, then pick a model. Otherwise give the provider and models as options.
+	\\
+	\\Local models: pick Ollama, llama.cpp, LM Studio or vLLM, or use --base-url for a server anywhere on your
+	\\network; apo lists the models the server has. --provider takes an ID from the list; --key-env names the
+	\\environment variable holding the key of a --base-url server.
+
+login_help =
+	\\usage: apo login [<provider>] [--config <config.json>]
+	\\
+	\\Stores a provider's API key in $XDG_DATA_HOME/apo/auth.json (else ~/.local/share/apo/auth.json), readable only by
+	\\you. In a terminal it asks without showing the key; otherwise it reads the key from standard input. A stored
+	\\key is used before the provider's environment variable. Remove one with `apo logout <provider>`.
+
+logout_help =
+	\\usage: apo logout <provider>
+	\\
+	\\Removes a provider's stored API key.
+
+## The list as the picker shows it, with a mark where a key is already at hand.
+entry_items! : List(Catalog.Entry) => Try(List(Picker.Item), [Failed(Str)])
+entry_items! = |entries| {
+	stored = Auth.read!()?
+	var $items = []
+	for e in entries {
+		ready = stored.any(|(name, _)| name == e.id) or (e.key_env != "" and Io.env!(e.key_env) != "")
+		$items = $items.append({ label: if (ready) "${e.name}  (key found)" else e.name, value: e.id })
+	}
+	Ok($items)
+}
+
+find : List(Catalog.Entry), Str -> Try(Catalog.Entry, [Failed(Str)])
+find = |entries, id| match entries.keep_if(|e| e.id == id) {
+	[e, ..] => Ok(e)
+	[] => Err(Failed("no provider ${id}; run `apo init` in a terminal to see the list, or use --base-url"))
+}
+
+entries_of = || Catalog.parse(raw_providers).map_err(|m| Failed("providers.json: ${m}"))
+
+init! = |words| {
+	parsed = options(words, ["--claude-cli", "--force", "--help"], ["--provider", "--base-url", "--key-env", "--model", "--works", "--output", "--name", "--email", "--config"], init_help)?
+	if has_flag(parsed, "--help") {
+		return Stdout.line!(init_help)
+	}
+	no_arguments(parsed, init_help)?
+	path = Load.config_path!(option(parsed, "--config"))
+	if Io.exists!(path) and !has_flag(parsed, "--force") {
+		return Err(Failed("${path} exists; pass --force to replace it"))
+	}
+	interactive = Io.stdin_is_terminal!()
+	ask! = |given, question, default| {
+		if given != "" or !interactive {
+			return if (given != "") given else default
+		}
+		shown_default = if (default == "") "" else " [${default}]"
+		_ = Stderr.write!("${question}${shown_default}: ")
+		answer = (Stdin.line!() ?? "").trim()
+		if (answer == "") default else answer
+	}
+	entries = entries_of()?
+	entry = if has_flag(parsed, "--claude-cli") {
+		find(entries, "claude-code")?
+	} else if option(parsed, "--base-url") != "" {
+		find(entries, "server")?
+	} else if option(parsed, "--provider") != "" {
+		find(entries, option(parsed, "--provider"))?
+	} else if interactive {
+		find(entries, Prompt.pick!("Provider", entry_items!(entries)?, Bool.False)?)?
 	} else {
-		_ = Stderr.line!("${$total.to_str()} problem(s)")
-		Err(Invalid)
+		find(entries, "claude-code")?
 	}
-}
-
-## The runs an experiment resolves to, optionally just the one labelled `--only`.
-runs! : { named : List((Str, Str)), positional : List(Str) } => Try(List(Load.Run), [Usage(Str), Failed(Str)])
-runs! = |parsed| {
-	path = parsed.positional.first() ?? return Err(Usage("apo: name an experiment.json"))
-	loaded = Load.experiment!(path)?
-	chosen = match option(parsed, "--only") {
-		Ok(label) => loaded.runs.keep_if(|r| r.label == label)
-		Err(_) => loaded.runs
+	base_url = if entry.local {
+		ask!(option(parsed, "--base-url"), "Server URL (ending in /v1)", entry.base_url)
+	} else {
+		entry.base_url
 	}
-	if (chosen.is_empty()) Err(Failed("${path}: no runs (check models and --only)")) else Ok(chosen)
-}
-
-plan! = |words| {
-	parsed = options(words, ["--help"])?
-	if has_flag(parsed, "--help") {
-		return Stdout.line!("usage: apo plan <experiment.json> [--only <label>]\n\nLists each run's directory and, per step, how many calls are answered by its store and how many would go to the model, with an upper-bound cost from the models' prices. Makes no calls.")
+	if entry.local and base_url == "" {
+		return Err(Failed("a server needs a URL: pass --base-url"))
 	}
-	for run in runs!(parsed)? {
-		report = Execute.run!(run, version, Dry)?
-		Stdout.line!("${report.label}  ${report.dir}")?
-		for s in report.steps {
-			Stdout.line!("  ${s.kind}: ${s.items.to_str()} item(s), ${s.cached.to_str()} stored, ${s.planned.to_str()} to call (≤ $${Execute.money(s.estimate)})")?
+	key_env = if (option(parsed, "--key-env") != "") option(parsed, "--key-env") else entry.key_env
+	provider = Catalog.config(entry, base_url, key_env)
+	settings = Provider.settings(entry.id, provider).map_err(|m| Failed(m))?
+	if interactive and Catalog.takes_key(entry) and Auth.key!(settings)? == "" {
+		hint = if (key_env == "") "Enter for none" else "Enter to set ${key_env} yourself"
+		key = Prompt.secret!("API key for ${entry.name} (${hint})")?
+		if key != "" {
+			Auth.store!(entry.id, key)?
 		}
 	}
-	Ok({})
-}
-
-run_experiment! = |words| {
-	parsed = options(words, ["--paid", "--help"])?
-	if has_flag(parsed, "--help") {
-		return Stdout.line!("usage: apo run <experiment.json> [--paid] [--only <label>]\n\nRuns every model and prompt variant, resuming from each run's store. Calls to providers with an API key need --paid. A run stops at its budget or at an item that fails its checks every attempt; rerunning resumes it.")
+	given_models = values(parsed, "--model").map(|id| id.trim()).keep_if(|id| id != "")
+	ids = if !given_models.is_empty() {
+		given_models
+	} else {
+		choose_model!(entry, settings, interactive, ask!)?
 	}
-	var $failed = Bool.False
-	for run in runs!(parsed)? {
-		report = Execute.run!(run, version, Live({ paid: has_flag(parsed, "--paid") }))?
-		called = report.steps.map(|s| s.called).sum()
-		failed = report.steps.map(|s| s.failed).sum()
-		cached = report.steps.map(|s| s.cached).sum()
-		Stdout.line!("${report.label}: ${report.status}; ${called.to_str()} call(s), ${cached.to_str()} from the store, ${failed.to_str()} item(s) failed, $${Execute.money(report.cost)} spent; ${report.dir}")?
-		if report.status != "completed" {
-			$failed = Bool.True
-		}
-	}
-	if ($failed) Err(Invalid) else Ok({})
-}
-
-gold! = |words| {
-	parsed = options(words, ["--help"])?
-	match parsed.positional {
-		["fetch", manifest_path] => {
-			manifest = Gold.manifest(Io.json!(manifest_path)?).map_err(|m| Failed("${manifest_path}: ${m}"))?
-			files = Evaluate.fetch!(manifest)?
-			for (name, path) in files {
-				Stdout.line!("${name}: ${path}")?
+	models = ids.map(
+		|id| {
+			name = match id.split_last("/") {
+				Ok({ before: _, after }) => after
+				Err(_) => id
 			}
-			Stdout.line!("licence: ${manifest.license}")
-		}
-		_ => Stdout.line!("usage: apo gold fetch <gold.json>\n\nDownloads a gold manifest's files into the cache (APO_CACHE, else ~/.cache/apo) and checks each against its pinned SHA-256.")
-	}
+			# Hosted models increasingly reject `temperature`; a local one is deterministic only with it.
+			options_json = if (entry.local) [("options", JsonValue.object([("temperature", JsonValue.Number("0"))]))] else []
+			JsonValue.object([("name", JsonValue.str(name)), ("provider", JsonValue.str(entry.id)), ("id", JsonValue.str(id))].concat(options_json))
+		},
+	)
+	cwd = Path.display(Env.cwd!() ?? Path.unix("."))
+	absolute = |p| if (p.starts_with("/")) p else "${cwd}/${p.drop_prefix("./")}"
+	works = absolute(ask!(option(parsed, "--works"), "Works folder (one <work>.conllu per text)", "works"))
+	output = absolute(ask!(option(parsed, "--output"), "Output folder", "apo-output"))
+	name = ask!(option(parsed, "--name"), "Your name, credited in outputs (optional)", "")
+	email = ask!(option(parsed, "--email"), "Your email (optional)", "")
+	author = [("name", name), ("email", email)].keep_if(|(_, v)| v != "").map(|(k, v)| (k, JsonValue.str(v)))
+	# A local model on modest hardware can take minutes over one sentence.
+	limits = if (entry.local) [("limits", JsonValue.object([("timeout_seconds", JsonValue.u64(600))]))] else []
+	config = JsonValue.object(
+		[
+			("providers", JsonValue.object([(entry.id, provider)])),
+			("models", JsonValue.list(models)),
+			("works_dir", JsonValue.str(works)),
+			("output_dir", JsonValue.str(output)),
+		].concat(limits).concat(if (author.is_empty()) [] else [("author", JsonValue.object(author))]),
+	)
+	Io.write!(path, "${JsonValue.pretty(config)}\n")?
+	Io.mkdir!(works)?
+	Stderr.line!("wrote ${path}\n\nPut CoNLL-U files in ${works}, one <work>.conllu per text (optionally <work>.context.md and\n<work>.refs.tsv beside each), then run: apo run --count 5")
 }
 
-eval! = |words| {
-	parsed = options(words, ["--json", "--help"])?
-	manifest_path = match option(parsed, "--gold") {
-		Ok(p) => p
-		Err(_) => return Stdout.line!("usage: apo eval <run-dir>... --gold <gold.json> [--json]\n\nScores each run against a gold set and writes the scores to <run-dir>/eval/<gold>.json.")
+## The model IDs to use: picked from what the provider lists, or typed when it lists none or cannot be reached.
+choose_model! = |entry, settings, interactive, ask!| {
+	if entry.protocol == "claude-cli" {
+		return Ok([ask!("", "Model", "sonnet")])
 	}
-	manifest = Gold.manifest(Io.json!(manifest_path)?).map_err(|m| Failed("${manifest_path}: ${m}"))?
-	files = Evaluate.fetch!(manifest)?
-	for dir in parsed.positional {
-		run = Evaluate.output!(dir)?
-		scores = Evaluate.score!(manifest, files, run)?
-		record = JsonValue.object([("run", JsonValue.str(dir)), ("label", JsonValue.str(run.label)), ("gold", JsonValue.str(manifest.name)), ("license", JsonValue.str(manifest.license))].concat(scores))
-		Io.write!("${dir}/eval/${manifest.name}.json", JsonValue.pretty(record))?
-		if has_flag(parsed, "--json") {
-			Stdout.line!(JsonValue.encode(record))?
-		} else {
-			Stdout.line!("${run.label} vs ${manifest.name}")?
-			for (name, value) in scores {
-				Stdout.line!("  ${name}: ${JsonValue.encode(value)}")?
+	if !interactive {
+		return Err(Failed("name a model with --model"))
+	}
+	key = Auth.key!(settings)?
+	listed = match Execute.models!(settings, key) {
+		Ok(ids) => ids
+		Err(NoListing) => []
+		Err(Unreachable(why)) => {
+			if entry.local {
+				_ = Stderr.line!("Could not list models (is the server running?): ${why}")
+			} else {
+				_ = Stderr.line!("Could not list models: ${why}")
 			}
+			[]
 		}
 	}
-	Ok({})
+	if listed.is_empty() {
+		typed = ask!("", "Model ID", "")
+		return if (typed == "") Err(Failed("no model given")) else Ok([typed])
+	}
+	Ok([Prompt.pick!("Model", listed.map(|id| { label: id, value: id }), Bool.True)?])
 }
 
-compare! = |words| {
-	parsed = options(words, ["--paid", "--help"])?
-	dirs = parsed.positional
-	help = "usage:\n  apo compare <run-dir>... --judge <judge.json> --out <dir> [--paid]   a judge model's pairwise preferences\n  apo compare <run-dir>... --export-preferences <sheet.tsv>            a blinded sheet for reviewers\n  apo compare --import-preferences <sheet.tsv>... --key <sheet.tsv.key.json> --out <dir>\n  apo compare <run-dir>... --export-mqm <sheet.tsv>                    an MQM error-annotation sheet\n  apo compare --import-mqm <sheet.tsv> --key <sheet.tsv.key.json>\n\nRuns are compared on passage translations when all have them, else on sentence translations. A judge sees each\npair in both orders; orders that disagree count as a tie. Rankings are Bradley–Terry strengths."
+login! = |words| {
+	parsed = options(words, ["--help"], ["--config"], login_help)?
 	if has_flag(parsed, "--help") {
-		return Stdout.line!(help)
+		return Stdout.line!(login_help)
 	}
-	match (option(parsed, "--judge"), option(parsed, "--export-preferences"), option(parsed, "--import-preferences"), option(parsed, "--export-mqm"), option(parsed, "--import-mqm")) {
-		(Ok(judge), _, _, _, _) => Compare.judge!(dirs, judge, option(parsed, "--out") ?? "compare", has_flag(parsed, "--paid"))
-		(_, Ok(sheet), _, _, _) => Compare.export_preferences!(dirs, sheet)
-		(_, _, Ok(sheet), _, _) => Compare.import_preferences!(dirs.prepend(sheet), option(parsed, "--key") ?? "${sheet}.key.json", option(parsed, "--out") ?? "compare")
-		(_, _, _, Ok(sheet), _) => Compare.export_mqm!(dirs, sheet)
-		(_, _, _, _, Ok(sheet)) => Compare.import_mqm!(sheet, option(parsed, "--key") ?? "${sheet}.key.json")
-		_ => Stdout.line!(help)
+	entries = entries_of()?
+	interactive = Io.stdin_is_terminal!()
+	id = match parsed.positional {
+		[one] => one
+		[] => if (interactive) Prompt.pick!("Provider", entry_items!(entries.keep_if(Catalog.takes_key))?, Bool.False)? else return Err(Usage(login_help))
+		_ => return Err(Usage(login_help))
 	}
+	key = if (interactive) Prompt.secret!("API key for ${id}")? else (Stdin.line!() ?? "").trim()
+	if key == "" {
+		return Err(Failed("no key given"))
+	}
+	Auth.store!(id, key)?
+	Stderr.line!("stored the key for ${id} in ${Auth.path!()}")
 }
 
-export! = |words| {
-	parsed = options(words, ["--help"])?
+logout! = |words| {
+	parsed = options(words, ["--help"], [], logout_help)?
+	if has_flag(parsed, "--help") {
+		return Stdout.line!(logout_help)
+	}
 	match parsed.positional {
-		[run_dir, dest] if !has_flag(parsed, "--help") => Archive.export!(run_dir, dest, version)
-		_ => Stdout.line!("usage: apo export <run-dir> <work-dir>\n\nWrites a completed run as an archive work folder: output.conllu, units.jsonl, config.json (the run, apo version\nand prompts it came from), costs.tsv, and the run's manifest as apo-manifest.json.")
+		[id] => if (Auth.remove!(id)?) Stderr.line!("removed the key for ${id}") else Err(Failed("no stored key for ${id}"))
+		_ => Err(Usage(logout_help))
 	}
-}
-
-adopt! = |words| {
-	parsed = options(words, ["--help"])?
-	match parsed.positional {
-		[work] if !has_flag(parsed, "--help") => Archive.adopt!(work, option(parsed, "--runs") ?? "runs", version)
-		_ => Stdout.line!("usage: apo adopt <work-dir> [--runs <dir>]\n\nWraps a work folder made before apo (output.conllu, units.jsonl, config.json) as a run under <dir>/adopted/,\nmarked not replayable, so apo eval and apo compare can score it next to new runs.")
-	}
-}
-
-seed! = |words| {
-	parsed = options(words, ["--help"])?
-	work = match option(parsed, "--from") {
-		Ok(w) if !has_flag(parsed, "--help") => w
-		_ => return Stdout.line!("usage: apo seed <experiment.json> --from <work-dir> [--only <label>]\n\nFills each run's store from an archive work folder made before apo (output.conllu, units.jsonl): every call the\nrun would make is answered with what the work already holds, checked like any reply, until the work runs out.\nA later apo run then calls the model only for what the work lacks.")
-	}
-	for run in runs!(parsed)? {
-		report = Execute.run!(run, version, Seed(work))?
-		stored = report.steps.map(|s| s.cached).sum()
-		Stdout.line!("${report.label}: ${stored.to_str()} item(s) from ${work}; ${report.status}; ${report.dir}")?
-	}
-	Ok({})
 }

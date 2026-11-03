@@ -1,29 +1,27 @@
 import JsonValue
 
 ## Providers and models. A protocol is code (how to send a call and read the reply); an endpoint is configuration.
-##   openai-chat:        POST <base_url>/chat/completions. OpenRouter, PPQ, vLLM, llama.cpp, Ollama and others.
+##   openai-chat: POST <base_url>/chat/completions. OpenRouter, PPQ, vLLM, llama.cpp, Ollama and others.
 ##   anthropic-messages: POST <base_url>/v1/messages, with the system prompt cached between calls.
-##   claude-cli:         `claude -p` on the local Claude Code login.
-##   command:            any program: the call as JSON on stdin, `{ "content", "input_tokens", "output_tokens",
-##                       "cost" }` on stdout (only `content` is required).
-## API keys are read from the environment variable a provider names, and never stored.
+##   claude-cli:  `claude -p` on the local Claude Code login.
+##   command:     any program: the call as JSON on stdin, `{ "content", "input_tokens", "output_tokens" }` on stdout
+##                (only `content` is required).
+## API keys come from `apo login` (see cli/Auth.roc) or the environment variable a provider names; config.json holds none.
 Provider :: [].{
 	Protocol : [OpenAiChat, AnthropicMessages, ClaudeCli, Command(List(Str))]
 
-	Settings : { name : Str, protocol : Protocol, base_url : Str, key_env : Str, headers : List((Str, Str)), batch : Bool }
+	Settings : { name : Str, protocol : Protocol, base_url : Str, key_env : Str, max_tokens_key : Str, headers : List((Str, Str)) }
 
-	Prices : { input : Dec, output : Dec, cache_read : Dec }
-
-	Model : { name : Str, provider : Settings, id : Str, options : JsonValue, prices : Prices }
+	Model : { name : Str, provider : Settings, id : Str, options : JsonValue }
 
 	Call : { system : Str, user : Str, max_tokens : U64 }
 
 	Outbound : [
-		Http({ method : [Get, Post], url : Str, headers : List((Str, Str)), body : Str }),
+		Http({ url : Str, headers : List((Str, Str)), body : Str }),
 		Exec({ argv : List(Str), env : List((Str, Str)), cwd : Str, stdin : Str }),
 	]
 
-	Reply : { content : Str, input_tokens : U64, output_tokens : U64, cache_read_tokens : U64, reported_cost : [Reported(Dec), Unknown] }
+	Reply : { content : Str, input_tokens : U64, output_tokens : U64 }
 
 	protocol_name : Protocol -> Str
 	protocol_name = |p| match p {
@@ -33,64 +31,33 @@ Provider :: [].{
 		Command(_) => "command"
 	}
 
-	## The providers in providers.json: `{ "providers": { "<name>": { "protocol", "base_url", "key_env", "headers",
-	## "command" } } }`.
-	settings : JsonValue -> Try(List(Settings), Str)
-	settings = |json| {
-		var $out = []
-		for (name, p) in (json.field("providers") ?? return Err("providers.json needs a providers object")).fields() {
-			text = |key| (p.field(key) ?? JsonValue.str("")).as_str() ?? ""
-			protocol = match text("protocol") {
-				"openai-chat" => OpenAiChat
-				"anthropic-messages" => AnthropicMessages
-				"claude-cli" => ClaudeCli
-				"command" => {
-					argv = (p.field("command") ?? JsonValue.list([])).items().map(|a| a.as_str() ?? "")
-					if argv.is_empty() or argv.contains("") {
-						return Err("provider ${name}: command needs a non-empty list of strings")
-					}
-					Command(argv)
+	## A provider from its config entry: `{ "protocol", "base_url", "key_env", "max_tokens_key", "headers", "command" }`.
+	## `max_tokens_key` names the limit in the request body where an API differs (OpenAI: `max_completion_tokens`).
+	settings : Str, JsonValue -> Try(Settings, Str)
+	settings = |name, p| {
+		text = |key| (p.field(key) ?? JsonValue.str("")).as_str() ?? ""
+		protocol = match text("protocol") {
+			"openai-chat" => OpenAiChat
+			"anthropic-messages" => AnthropicMessages
+			"claude-cli" => ClaudeCli
+			"command" => {
+				argv = (p.field("command") ?? JsonValue.list([])).items().map(|a| a.as_str() ?? "")
+				if argv.is_empty() or argv.contains("") {
+					return Err("provider ${name}: command needs a non-empty list of strings")
 				}
-				other => return Err("provider ${name}: unknown protocol ${other}")
+				Command(argv)
 			}
-			base = match (protocol, text("base_url")) {
-				(AnthropicMessages, "") => "https://api.anthropic.com"
-				(OpenAiChat, "") => return Err("provider ${name}: openai-chat needs base_url")
-				(_, url) => url
-			}
-			headers = (p.field("headers") ?? JsonValue.object([])).fields().map(|(k, v)| (k, v.as_str() ?? ""))
-			batch = (p.field("batch") ?? JsonValue.bool(Bool.False)).as_bool() ?? Bool.False
-			if batch and protocol != AnthropicMessages {
-				return Err("provider ${name}: batch needs the anthropic-messages protocol")
-			}
-			$out = $out.append({ name, protocol, base_url: base.drop_suffix("/"), key_env: text("key_env"), headers, batch })
+			other => return Err("provider ${name}: unknown protocol \"${other}\"; expected openai-chat, anthropic-messages, claude-cli or command")
 		}
-		Ok($out)
+		if protocol == OpenAiChat and text("base_url") == "" {
+			return Err("provider ${name}: openai-chat needs base_url")
+		}
+		headers = (p.field("headers") ?? JsonValue.object([])).fields().map(|(k, v)| (k, v.as_str() ?? ""))
+		base_url = if (protocol == AnthropicMessages and text("base_url") == "") "https://api.anthropic.com" else text("base_url").drop_suffix("/")
+		Ok({ name, protocol, base_url, key_env: text("key_env"), max_tokens_key: text("max_tokens_key"), headers })
 	}
 
-	## A model from an experiment's `models` entry: `{ "name", "provider", "id", "options", "prices": { "input",
-	## "output", "cache_read" } }` with prices in US dollars per million tokens.
-	model : JsonValue, List(Settings) -> Try(Model, Str)
-	model = |json, providers| {
-		text = |key| (json.field(key) ?? JsonValue.str("")).as_str() ?? ""
-		provider_name = text("provider")
-		provider = match providers.keep_if(|p| p.name == provider_name) {
-			[p, ..] => p
-			[] => return Err("model ${text("name")}: no provider named ${provider_name}")
-		}
-		prices = json.field("prices") ?? JsonValue.object([])
-		price = |key| (prices.field(key) ?? JsonValue.Number("0")).as_dec() ?? 0
-		if text("name") == "" or text("id") == "" {
-			return Err("every model needs a name and an id")
-		}
-		Ok({ name: text("name"), provider, id: text("id"), options: json.field("options") ?? JsonValue.object([]), prices: { input: price("input"), output: price("output"), cache_read: price("cache_read") } })
-	}
-
-	## Whether a call costs money: it reaches a provider through an API key.
-	paid : Model -> Bool
-	paid = |m| m.provider.key_env != ""
-
-	## What determines a reply: hashed for the run store. The key and the endpoint's credentials are not part of it.
+	## What determines a reply: hashed for the reply cache. The key and the endpoint's credentials are not part of it.
 	identity : Model, Call -> JsonValue
 	identity = |m, c| JsonValue.object([
 		("protocol", JsonValue.str(protocol_name(m.provider.protocol))),
@@ -106,16 +73,17 @@ Provider :: [].{
 	outbound : Model, Call, Str -> Outbound
 	outbound = |m, c, key| match m.provider.protocol {
 		OpenAiChat => {
+			limit_key = if (m.provider.max_tokens_key == "") "max_tokens" else m.provider.max_tokens_key
 			body = JsonValue.merge(
 				JsonValue.object([
 					("model", JsonValue.str(m.id)),
-					("max_tokens", JsonValue.u64(c.max_tokens)),
+					(limit_key, JsonValue.u64(c.max_tokens)),
 					("messages", JsonValue.list([message("system", c.system), message("user", c.user)])),
 				]),
 				m.options,
 			)
 			auth = if (key == "") [] else [("Authorization", "Bearer ${key}")]
-			Http({ method: Post, url: "${m.provider.base_url}/chat/completions", headers: auth.concat(m.provider.headers).append(("Content-Type", "application/json")), body: JsonValue.encode(body) })
+			Http({ url: "${m.provider.base_url}/chat/completions", headers: auth.concat(m.provider.headers).append(("Content-Type", "application/json")), body: JsonValue.encode(body) })
 		}
 		AnthropicMessages => {
 			system = JsonValue.list([JsonValue.object([("type", JsonValue.str("text")), ("text", JsonValue.str(c.system)), ("cache_control", JsonValue.object([("type", JsonValue.str("ephemeral"))]))])])
@@ -128,7 +96,7 @@ Provider :: [].{
 				]),
 				m.options,
 			)
-			Http({ method: Post, url: "${m.provider.base_url}/v1/messages", headers: [("x-api-key", key), ("anthropic-version", "2023-06-01")].concat(m.provider.headers).append(("Content-Type", "application/json")), body: JsonValue.encode(body) })
+			Http({ url: "${m.provider.base_url}/v1/messages", headers: anthropic_headers(key).concat(m.provider.headers).append(("Content-Type", "application/json")), body: JsonValue.encode(body) })
 		}
 		ClaudeCli => Exec({
 			argv: ["claude", "-p", "--model", m.id, "--system-prompt", c.system, "--output-format", "json", "--tools", "", "--strict-mcp-config", "--disable-slash-commands", "--no-session-persistence", "--setting-sources", "", c.user],
@@ -139,55 +107,29 @@ Provider :: [].{
 		Command(argv) => Exec({ argv, env: [], cwd: "", stdin: JsonValue.encode(JsonValue.object([("model", JsonValue.str(m.id)), ("options", m.options), ("system", JsonValue.str(c.system)), ("user", JsonValue.str(c.user)), ("max_tokens", JsonValue.u64(c.max_tokens))])) })
 	}
 
-	## The Message Batches API (half price): one request carrying many calls, each under a custom ID.
-	batch_submit : Model, List((Str, Call)), Str -> Outbound
-	batch_submit = |m, calls, key| {
-		requests = calls.map(
-			|(id, c)| match outbound(m, c, key) {
-				Http(h) => JsonValue.object([("custom_id", JsonValue.str(id)), ("params", JsonValue.decode(h.body) ?? JsonValue.null)])
-				Exec(_) => JsonValue.null
-			},
-		)
-		Http({ method: Post, url: "${m.provider.base_url}/v1/messages/batches", headers: anthropic_headers(m, key), body: JsonValue.encode(JsonValue.object([("requests", JsonValue.list(requests))])) })
+	anthropic_headers : Str -> List((Str, Str))
+	anthropic_headers = |key| [("x-api-key", key), ("anthropic-version", "2023-06-01")]
+
+	## Where a provider lists its models, and the headers to ask with: `{ data: [{ id }] }` from every API apo speaks,
+	## hosted or local. Providers without one (`claude-cli`, `command`) have none.
+	models_request : Settings, Str -> Try({ url : Str, headers : List((Str, Str)) }, [NoListing])
+	models_request = |p, key| match p.protocol {
+		OpenAiChat => Ok({ url: "${p.base_url}/models", headers: (if (key == "") [] else [("Authorization", "Bearer ${key}")]).concat(p.headers) })
+		AnthropicMessages => Ok({ url: "${p.base_url}/v1/models?limit=1000", headers: anthropic_headers(key).concat(p.headers) })
+		ClaudeCli | Command(_) => Err(NoListing)
 	}
 
-	batch_poll : Model, Str, Str -> Outbound
-	batch_poll = |m, id, key| Http({ method: Get, url: "${m.provider.base_url}/v1/messages/batches/${id}", headers: anthropic_headers(m, key), body: "" })
-
-	batch_fetch : Model, Str, Str -> Outbound
-	batch_fetch = |m, url, key| Http({ method: Get, url, headers: anthropic_headers(m, key), body: "" })
-
-	anthropic_headers : Model, Str -> List((Str, Str))
-	anthropic_headers = |m, key| [("x-api-key", key), ("anthropic-version", "2023-06-01")].concat(m.provider.headers).append(("Content-Type", "application/json"))
-
-	## A batch's ID, whether it has ended, and where its results are.
-	batch_status : Str -> Try({ id : Str, ended : Bool, results_url : Str }, Str)
-	batch_status = |body| {
-		json = JsonValue.decode(body)?
-		text = |key| (json.field(key) ?? JsonValue.str("")).as_str() ?? ""
-		if text("id") == "" {
-			return Err("the batch reply has no id: ${body}")
-		}
-		Ok({ id: text("id"), ended: text("processing_status") == "ended", results_url: text("results_url") })
+	## The model IDs in a listing, sorted.
+	model_ids : Str -> Try(List(Str), Str)
+	model_ids = |body| {
+		json = JsonValue.decode(body.trim()).map_err(|e| "the model list is not JSON: ${e}")?
+		Ok((json.field("data") ?? JsonValue.null).items().keep_oks(|m| (m.field("id") ?? JsonValue.null).as_str()).sort_with(JsonValue.compare))
 	}
-
-	## A batch's results (JSONL): each custom ID with its message as a Messages reply body, or why it has none.
-	batch_results : Str -> List((Str, Try(Str, Str)))
-	batch_results = |jsonl| jsonl.split_on("\n").keep_oks(|line| JsonValue.decode(line)).map(
-		|r| {
-			id = (r.field("custom_id") ?? JsonValue.str("")).as_str() ?? ""
-			result = r.field("result") ?? JsonValue.object([])
-			match (result.field("type") ?? JsonValue.str("")).as_str() ?? "" {
-				"succeeded" => (id, Ok(JsonValue.encode(result.field("message") ?? JsonValue.null)))
-				other => (id, Err("batch result ${other}: ${JsonValue.encode(result.field("error") ?? JsonValue.null)}"))
-			}
-		},
-	)
 
 	message : Str, Str -> JsonValue
 	message = |role, content| JsonValue.object([("role", JsonValue.str(role)), ("content", JsonValue.str(content))])
 
-	## The reply's text, token counts, and cost when the provider reports one.
+	## The reply's text and token counts.
 	reply : Model, Str -> Try(Reply, Str)
 	reply = |m, body| {
 		json = JsonValue.decode(body.trim()).map_err(|e| "the provider's reply is not JSON: ${e}")?
@@ -202,8 +144,7 @@ Provider :: [].{
 					[] => return Err("the reply has no choices")
 				}
 				usage = json.field("usage") ?? JsonValue.object([])
-				cached = (usage.field("prompt_tokens_details") ?? JsonValue.object([])).field("cached_tokens") ?? JsonValue.Number("0")
-				Ok({ content, input_tokens: count(usage, "prompt_tokens"), output_tokens: count(usage, "completion_tokens"), cache_read_tokens: cached.as_u64() ?? 0, reported_cost: reported(usage.field("cost")) })
+				Ok({ content, input_tokens: count(usage, "prompt_tokens"), output_tokens: count(usage, "completion_tokens") })
 			}
 			AnthropicMessages => {
 				if json.field("error").is_ok() {
@@ -212,90 +153,60 @@ Provider :: [].{
 				texts = (json.field("content") ?? JsonValue.null).items().keep_if(|b| (b.field("type") ?? JsonValue.null).as_str() == Ok("text"))
 				content = Str.join_with(texts.map(|b| (b.field("text") ?? JsonValue.null).as_str() ?? ""), "")
 				usage = json.field("usage") ?? JsonValue.object([])
-				Ok({ content, input_tokens: count(usage, "input_tokens") + count(usage, "cache_creation_input_tokens"), output_tokens: count(usage, "output_tokens"), cache_read_tokens: count(usage, "cache_read_input_tokens"), reported_cost: Unknown })
+				Ok({ content, input_tokens: count(usage, "input_tokens") + count(usage, "cache_creation_input_tokens") + count(usage, "cache_read_input_tokens"), output_tokens: count(usage, "output_tokens") })
 			}
 			ClaudeCli => {
 				if (json.field("is_error") ?? JsonValue.bool(Bool.False)).as_bool() == Ok(Bool.True) {
 					return Err("claude reported an error: ${(json.field("result") ?? JsonValue.null).as_str() ?? ""}")
 				}
 				usage = json.field("usage") ?? JsonValue.object([])
-				Ok({
-					content: (json.field("result") ?? JsonValue.null).as_str() ?? "",
-					input_tokens: count(usage, "input_tokens") + count(usage, "cache_creation_input_tokens"),
-					output_tokens: count(usage, "output_tokens"),
-					cache_read_tokens: count(usage, "cache_read_input_tokens"),
-					reported_cost: reported(json.field("total_cost_usd")),
-				})
+				Ok({ content: (json.field("result") ?? JsonValue.null).as_str() ?? "", input_tokens: count(usage, "input_tokens") + count(usage, "cache_creation_input_tokens") + count(usage, "cache_read_input_tokens"), output_tokens: count(usage, "output_tokens") })
 			}
 			Command(_) => Ok({
 				content: (json.field("content") ?? return Err("the command's reply has no content")).as_str() ?? "",
 				input_tokens: count(json, "input_tokens"),
 				output_tokens: count(json, "output_tokens"),
-				cache_read_tokens: count(json, "cache_read_tokens"),
-				reported_cost: reported(json.field("cost")),
 			})
-		}
-	}
-
-	## Long decimals (JavaScript prints 0.0008872000000000001) are cut to Dec's 18 places.
-	reported : Try(JsonValue, _) -> [Reported(Dec), Unknown]
-	reported = |field| match field {
-		Ok(JsonValue.Number(text)) => {
-			short = match text.split_on(".") {
-				[whole, fraction] => "${whole}.${Str.from_utf8(fraction.to_utf8().take_first(18)) ?? "0"}"
-				_ => text
-			}
-			match Dec.from_str(short) {
-				Ok(n) => Reported(n)
-				Err(_) => Unknown
-			}
-		}
-		_ => Unknown
-	}
-
-	## The provider's reported cost, else the model's prices applied to the token counts.
-	cost : Model, Reply -> Dec
-	cost = |m, r| match r.reported_cost {
-		Reported(n) => n
-		Unknown => {
-			fresh = r.input_tokens.to_dec() * m.prices.input
-			cached = r.cache_read_tokens.to_dec() * m.prices.cache_read
-			out = r.output_tokens.to_dec() * m.prices.output
-			(fresh + cached + out) / 1000000
 		}
 	}
 }
 
-local = { name: "local", provider: { name: "local", protocol: OpenAiChat, base_url: "http://127.0.0.1:8080/v1", key_env: "", headers: [], batch: Bool.False }, id: "qwen", options: JsonValue.object([("temperature", JsonValue.Number("0"))]), prices: { input: 0, output: 0, cache_read: 0 } }
+local = { name: "local", provider: { name: "local", protocol: OpenAiChat, base_url: "http://127.0.0.1:8080/v1", key_env: "", max_tokens_key: "", headers: [] }, id: "qwen", options: JsonValue.object([("temperature", JsonValue.Number("0"))]) }
 
 expect match Provider.outbound(local, { system: "S", user: "U", max_tokens: 10 }, "") {
 	Http(h) => h.url == "http://127.0.0.1:8080/v1/chat/completions" and h.body == "{\"model\":\"qwen\",\"max_tokens\":10,\"messages\":[{\"role\":\"system\",\"content\":\"S\"},{\"role\":\"user\",\"content\":\"U\"}],\"temperature\":0}" and h.headers == [("Content-Type", "application/json")]
 	Exec(_) => Bool.False
 }
 
-expect match Provider.reply(local, "{\"choices\":[{\"message\":{\"content\":\"{}\"}}],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3,\"cost\":0.0008872000000000001}}") {
-	Ok(r) => r.content == "{}" and r.input_tokens == 7 and r.reported_cost == Reported(0.000887200000000000)
+expect match Provider.reply(local, "{\"choices\":[{\"message\":{\"content\":\"{}\"}}],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":3}}") {
+	Ok(r) => r.content == "{}" and r.input_tokens == 7 and r.output_tokens == 3
 	Err(_) => Bool.False
 }
 
-expect {
-	anthropic = { ..local, provider: { ..local.provider, protocol: AnthropicMessages, base_url: "https://api.anthropic.com" }, prices: { input: 3, output: 15, cache_read: 0.3 } }
-	match Provider.reply(anthropic, "{\"content\":[{\"type\":\"text\",\"text\":\"hi\"}],\"usage\":{\"input_tokens\":1000000,\"output_tokens\":0,\"cache_read_input_tokens\":1000000}}") {
-		Ok(r) => r.content == "hi" and Provider.cost(anthropic, r) == 3.3
-		Err(_) => Bool.False
-	}
+expect Provider.settings("x", JsonValue.decode("{\"protocol\": \"command\", \"command\": [\"echo\"]}") ?? JsonValue.null).map_ok(|p| p.protocol) == Ok(Command(["echo"]))
+
+expect Provider.settings("x", JsonValue.decode("{\"protocol\": \"openai-chat\"}") ?? JsonValue.null).is_err()
+
+# The cache key must not change: replies stored by earlier versions stay valid.
+expect JsonValue.canonical(Provider.identity(local, { system: "S", user: "U", max_tokens: 1 })) == "{\"base_url\":\"http://127.0.0.1:8080/v1\",\"max_tokens\":1,\"model\":\"qwen\",\"options\":{\"temperature\":0},\"protocol\":\"openai-chat\",\"system\":\"S\",\"user\":\"U\"}"
+
+expect Provider.model_ids("{\"object\": \"list\", \"data\": [{\"id\": \"b\"}, {\"id\": \"a\"}]}") == Ok(["a", "b"])
+
+expect Provider.models_request(local.provider, "k").map_ok(|r| r.url) == Ok("http://127.0.0.1:8080/v1/models")
+
+expect match Provider.outbound({ ..local, provider: { ..local.provider, max_tokens_key: "max_completion_tokens" } }, { system: "S", user: "U", max_tokens: 10 }, "") {
+	Http(h) => h.body.contains("\"max_completion_tokens\":10") and !h.body.contains("\"max_tokens\"")
+	Exec(_) => Bool.False
 }
 
-expect Provider.settings(JsonValue.decode("{\"providers\": {\"x\": {\"protocol\": \"command\", \"command\": [\"echo\"]}}}") ?? JsonValue.null).map_ok(|ps| ps.map(|p| p.protocol)) == Ok([Command(["echo"])])
+anthropic = { ..local, provider: { ..local.provider, protocol: AnthropicMessages, base_url: "https://api.anthropic.com" } }
 
-expect Provider.batch_status("{\"id\":\"msgbatch_1\",\"processing_status\":\"ended\",\"results_url\":\"https://x/results\"}") == Ok({ id: "msgbatch_1", ended: Bool.True, results_url: "https://x/results" })
+expect match Provider.outbound(anthropic, { system: "S", user: "U", max_tokens: 10 }, "k") {
+	Http(h) => h.url == "https://api.anthropic.com/v1/messages" and h.headers.contains(("x-api-key", "k")) and h.body.contains("\"max_tokens\":10")
+	Exec(_) => Bool.False
+}
 
-expect Provider.batch_results("{\"custom_id\":\"a\",\"result\":{\"type\":\"succeeded\",\"message\":{\"content\":[]}}}\n{\"custom_id\":\"b\",\"result\":{\"type\":\"errored\",\"error\":{\"type\":\"x\"}}}\n").map(|(id, r)| (id, r.is_ok())) == [("a", Bool.True), ("b", Bool.False)]
-
-expect {
-	anthropic = { ..local, provider: { ..local.provider, protocol: AnthropicMessages, base_url: "https://api.anthropic.com", batch: Bool.True } }
-	match Provider.batch_submit(anthropic, [("h1", { system: "S", user: "U", max_tokens: 5 })], "k") {
-		Http(h) => h.url == "https://api.anthropic.com/v1/messages/batches" and h.body.contains("\"custom_id\":\"h1\"") and h.body.contains("\"cache_control\"")
-		Exec(_) => Bool.False
-	}
+expect match Provider.reply(anthropic, "{\"content\":[{\"type\":\"text\",\"text\":\"{}\"}],\"usage\":{\"input_tokens\":7,\"output_tokens\":3}}") {
+	Ok(r) => r.content == "{}" and r.input_tokens == 7 and r.output_tokens == 3
+	Err(_) => Bool.False
 }

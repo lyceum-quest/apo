@@ -1,0 +1,13 @@
+{
+  "providers": {
+    "echo": { "protocol": "command", "command": ["../echo-model"] }
+  },
+  "models": [
+    { "name": "echo", "provider": "echo", "id": "echo-1" }
+  ],
+  "works_dir": "works",
+  "output_dir": "apo-output",
+  "prompts_dir": "prompts",
+  "limits": { "attempts": 2, "timeout_seconds": 30 },
+  "author": { "name": "A Tester", "email": "tester@example.org" }
+}
