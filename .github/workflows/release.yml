@@ -1,0 +1,98 @@
+# Pushing a tag vX.Y.Z (matching VERSION) tests apo, builds it for Linux x86_64, Linux arm64 and macOS arm64, and
+# publishes a GitHub release with one archive per system and their SHA256SUMS.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  KAI_VERSION: 0.0.10
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check the tag matches VERSION
+        run: test "v$(cat VERSION)" = "$GITHUB_REF_NAME"
+
+      - uses: DeterminateSystems/nix-installer-action@main
+
+      - name: Install kai
+        run: |
+          base=https://github.com/thebrandonlucas/kai/releases/download/v$KAI_VERSION
+          archive=kai-$KAI_VERSION-x86_64-linux.tar.gz
+          curl -fsSLO "$base/$archive"
+          curl -fsSL "$base/SHA256SUMS" | grep " $archive\$" | sha256sum -c -
+          tar xzf "$archive"
+          install -Dm755 kai ~/.local/bin/kai
+          echo ~/.local/bin >> "$GITHUB_PATH"
+
+      - name: Test
+        run: |
+          kai --yes run test
+          kai --yes workflow e2e
+
+      - name: Build
+        run: |
+          kai --yes workflow build-linux
+          ./dist/apo-x86_64-linux --help > /dev/null
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: dist/
+
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: DeterminateSystems/nix-installer-action@main
+
+      # kai runs only on Linux, so take the Roc that Kaifile.roc names from the roc-overlay revision .kai/lock.json pins.
+      - name: Build
+        run: |
+          rev=$(jq -r '.nix.graph.nodes.roc.locked.rev' .kai/lock.json)
+          roc=$(grep -o 'rocpkgs\.nightly-[0-9a-z-]*' Kaifile.roc | cut -d. -f2)
+          mkdir -p dist
+          nix shell "github:roc-lang/roc-overlay/$rev#$roc" -c \
+            roc build cli/main.roc --target=arm64mac --output=dist/apo-aarch64-darwin
+          ./dist/apo-aarch64-darwin --help > /dev/null
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/
+
+  release:
+    needs: [linux, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Package
+        working-directory: dist
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          for system in x86_64-linux aarch64-linux aarch64-darwin; do
+            mkdir "$system"
+            install -m755 "apo-$system" "$system/apo"
+            tar czf "apo-$version-$system.tar.gz" -C "$system" apo
+          done
+          sha256sum apo-*.tar.gz > SHA256SUMS
+
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "apo ${GITHUB_REF_NAME#v}" \
+            --generate-notes dist/apo-*.tar.gz dist/SHA256SUMS
