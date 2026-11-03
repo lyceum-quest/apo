@@ -1,11 +1,10 @@
 # apo
 
-apo (ἀπό, "from") glosses and translates Ancient Greek with language models. Give it annotated text (CoNLL-U, as in
-[Opera Graeca Adnotata](https://github.com/OperaGraecaAdnotata/OGA)) and a model; for every sentence it writes a prose
-translation and a contextual gloss for every word, and for every citation passage (a verse, a section) a passage
-translation. The model never writes the file: it returns small JSON answers that apo checks and merges.
+**A**gent **P**rose **O**rchestrator, or `apo` (Greek ἀπό, meaning "from") uses LLMs to generate contextual glosses and prose translations for Ancient Greek. Using [Opera Graeca Adnotata](https://github.com/OperaGraecaAdnotata/OGA) [CoNLL-U]() as a base, it takes config files which specify how agents should generate translations, then runs them to create the resulting translations!
 
-Design: [docs/design.md](docs/design.md).
+You can specify how much to generate, compare results across different models, and set parameters for each translation run. By the end you'll have a prose translation for every verse and a contextual gloss for each word.
+
+See more: [docs/design.md](docs/design.md).
 
 ## Build
 
